@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import copy
 import json
 import math
@@ -124,12 +125,20 @@ parser.add_argument("--ckpt_light", action="store_true", help="periodic checkpoi
 parser.add_argument("--ckpt_minutes", type=float, default=3.0, help="also checkpoint every n minutes of training wall-clock")
 parser.add_argument("--max_hours", type=float, default=None, help="stop after this much training wall-clock")
 parser.add_argument("--log_every", type=int, default=50)
+parser.add_argument("--tensorboard", action="store_true", help="write training scalars to <log_dir>/tensorboard (requires tensorboard)")
 parser.add_argument("--motion_dir", type=str, default=None, help="defaults to the robot's motion directory")
 parser.add_argument("--log_dir", type=str, default=os.path.join(REPO, "logs", "run"))
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--resume", type=str, default=None)
 parser.add_argument("--amp", type=str, default="bf16", choices=["none", "bf16"], help="autocast dtype for MLP matmuls")
 args = parser.parse_args()
+
+if args.tensorboard:
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError as exc:
+        parser.error(f"--tensorboard requires tensorboard in the training environment: {exc}")
+
 
 import torch
 import torch.nn as nn
@@ -870,6 +879,17 @@ if start_it == 0:
                 ",pi_lr,pi_mult,nonfinite\n")  # fmt: skip
     log_f.flush()
 LOG_EXTRA = "pi_lr" in open(log_path).readline()  # lr = base LR; pi_lr = policy LR (x pi_mult)
+tb_writer = None
+if args.tensorboard:
+    tb_writer = SummaryWriter(
+        log_dir=os.path.join(args.log_dir, "tensorboard"),
+        purge_step=start_it + 1 if args.resume else None,
+        flush_secs=10,
+    )
+    atexit.register(tb_writer.close)
+    with open(log_path) as header:
+        tb_columns = header.readline().strip().split(",")
+    print(f"TensorBoard: {os.path.join(args.log_dir, 'tensorboard')}", flush=True)
 # --ckpt_light: one background writer; a failed write is re-raised in the training loop (or at the end), at most 2 queued
 CKPT_POOL, CKPT_PENDING = (ThreadPoolExecutor(max_workers=1) if args.ckpt_light else None), []
 
@@ -948,6 +968,9 @@ for it in range(start_it, args.iterations):
                mean(agg["gn"]), mean(agg["surv"]), mean(stats["r"]), mean_nn(stats["ep_len"]), mean_nn(stats["ep_ret"]), term_frac, ips, lr]  # fmt: skip
         extra = [lr * pi_mult, float(pi_mult), int(NONFINITE)] if LOG_EXTRA else []
         log_f.write(",".join(f"{x:.6g}" if isinstance(x, float) else str(x) for x in row + extra) + "\n")
+        if tb_writer is not None:
+            for name, value in zip(tb_columns[1:], (row + extra)[1:]):
+                tb_writer.add_scalar(f"train/{name}", value, global_step=it + 1)
         deadline = args.lr_decay_by > 0 and it + 1 >= args.lr_decay_by
         if args.lr_decay_ret > 0 and DECAY_AT[0] is None and (row[12] >= args.lr_decay_ret or deadline):
             DECAY_AT[0] = it + 1
@@ -995,3 +1018,7 @@ for it in range(start_it, args.iterations):
 if CKPT_POOL is not None:  # every background checkpoint written (a failed write raises here: non-zero exit)
     ckpt_wait(drain=True)
     CKPT_POOL.shutdown()
+
+if tb_writer is not None:
+    tb_writer.close()
+log_f.close()

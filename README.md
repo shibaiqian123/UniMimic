@@ -121,6 +121,28 @@ Other tools: `tools/eval_metrics.py` (accuracy and contact metrics), `tools/rend
 `python -m blinkmimic.evaluate --record`), `tools/export_onnx.py` and `tools/play_onnx.py` (deployment format and a
 check of it in the simulator; `play_onnx.py` needs `onnxruntime`: `uv run --with onnxruntime python tools/play_onnx.py ...`).
 
+### TensorBoard (optional)
+
+Install TensorBoard into the training environment, then enable it explicitly:
+
+```bash
+uv pip install --python .venv/bin/python tensorboard
+PYTHON=.venv/bin/python bash scripts/train.sh logs/run_s0 --seed 0 --tensorboard
+.venv/bin/tensorboard --logdir logs --host 127.0.0.1 --port 6006
+```
+
+Scalars are written to `<log_dir>/tensorboard` every `--log_every` iterations
+(default 50), using the same values as `train_log.csv` with iteration as the step.
+They include world-model/policy/critic losses, imagined and simulated rewards,
+episode return and length, termination fraction, gradient norm, learning rates,
+throughput, and non-finite update count. These are training metrics, not held-out
+evaluation results. CSV output is retained. On resume, stale TensorBoard events
+after the restored checkpoint are hidden. Existing runs must be restarted with
+`--tensorboard` to produce events; old CSV rows are not imported automatically.
+
+TensorBoard is disabled by default so the original benchmark recipe keeps its
+logging behavior. Record whether it is enabled when comparing wall-clock times.
+
 ## Attribution and licenses
 
 - **Code.** BlinkMimic builds on [supermimic_vibed](https://github.com/zita-ch/supermimic_vibed) (Chong Zhang,
