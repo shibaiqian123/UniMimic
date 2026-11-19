@@ -1,0 +1,13 @@
+{
+  "imu_frame": "pelvis_rigid",
+  "quaternion_order": "wxyz",
+  "gyro_units": "rad/s",
+  "R_pelvis_from_imu_wxyz": [
+    1,
+    0,
+    0,
+    0
+  ],
+  "verified_on_this_robot": false,
+  "notes": "Example only: verify fixed IMU-to-pelvis rotation, motor order and physical robot before enabling."
+}

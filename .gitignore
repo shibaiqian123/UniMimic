@@ -17,3 +17,12 @@ results/
 *.pdf
 # virtual environment
 .venv/
+
+# deployment outputs
+/deploy_artifacts/
+/deploy_logs/
+/scripts/deploy/bridge/g1_bridge
+/scripts/deploy/bridge/libg1bridge_client.so
+
+/.deploy_deps/
+/.pytest_cache/

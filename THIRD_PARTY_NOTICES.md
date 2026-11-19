@@ -63,3 +63,7 @@ their own distributions under their own licenses (Apache-2.0, BSD-3-Clause and o
 The LAFAN1 motions (Ubisoft La Forge, CC BY-NC-ND 4.0) and the Unitree G1 description (BSD-3-Clause) are downloaded
 by `tools/download_data.sh` and are not redistributed here either; files derived from LAFAN1 (videos, GIFs,
 checkpoints) are not covered by this repository's MIT License.
+
+## SuperMimic-Repro-Sim2Real deployment bridge
+
+DDS bridge sources and wire client in scripts/deploy/bridge, plus adapted state parsing/state-machine behavior, derive from NJU-R-L-Group-Embodied-Lab/SuperMimic-Repro-Sim2Real (inspected commit 0905de4). Copyright (c) 2026 Yuxi Liu and Hongyu Ding. MIT license reproduced in scripts/deploy/bridge/LICENSE.

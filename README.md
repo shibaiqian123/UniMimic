@@ -254,3 +254,7 @@ Please also cite the works it builds on:
 
 MIT ([LICENSE](LICENSE)). Copyright (c) 2026 Fuyi Chen; portions Copyright (c) 2026 Huy-Quang-Dao (InstantTrack) and
 (c) 2026 ETH Zurich, Chong Zhang (supermimic_vibed). Data-derived files are excluded; see above.
+
+## Single-motion real-robot deployment
+
+See [deployment instructions](docs/DEPLOY_G1.md) for the BlinkMimic-specific export, CPU parity, isolated DDS tests and explicit G1 runner. This is a separate interface from the motion-baked ONNX playback tool; hardware validation is required.
