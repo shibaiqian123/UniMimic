@@ -258,3 +258,7 @@ MIT ([LICENSE](LICENSE)). Copyright (c) 2026 Fuyi Chen; portions Copyright (c) 2
 ## Single-motion real-robot deployment
 
 See [deployment instructions](docs/DEPLOY_G1.md) for the BlinkMimic-specific export, CPU parity, isolated DDS tests and explicit G1 runner. This is a separate interface from the motion-baked ONNX playback tool; hardware validation is required.
+
+### Native MuJoCo sim2sim
+
+See [SIM2SIM](docs/SIM2SIM.md) for the official Unitree G1 torque-motor test, 1 kHz PD, delay/parameter sweeps, training-model comparison and interactive viewer. Runtime does not connect to DDS or hardware.

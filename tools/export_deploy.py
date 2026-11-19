@@ -60,7 +60,7 @@ def main():
                       dynamic_axes={"obs_history":{0:"batch"},"goal":{0:"batch"},"actions":{0:"batch"}},
                       opset_version=18,dynamo=False)
     np.savez_compressed(a.out/"motion.npz",q=motion.q.numpy(),root_R=motion.root_R.numpy(),
-                        root_p=motion.root_p.numpy(),goal=goals.numpy(),static_goal=torch.stack(static).numpy())
+                        root_p=motion.root_p.numpy(),qd=motion.qd.numpy(),root_v=motion.root_v.numpy(),root_w=motion.root_w.numpy(),goal=goals.numpy(),static_goal=torch.stack(static).numpy())
     kp,kd=pd_gains(robot)
     motors=[motor_of(n) for n in robot.joint_names]
     meta=dict(schema="blinkmimic_single_motion_v1",joint_names=list(robot.joint_names),
