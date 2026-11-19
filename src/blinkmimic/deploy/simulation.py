@@ -30,10 +30,12 @@ class CpuSim:
     def state(self):
         return (self.d.qpos[self.qidx].copy(),self.d.qvel[self.vidx].copy(),
                 self.d.qvel[3:6].copy(),rotation(self.d.qpos[3:7]))
-    def step(self,target,kp=None,kd=None):
+    def step(self,target,kp=None,kd=None,before_substep=None):
         if kp is not None:
             self.m.actuator_gainprm[:,0]=kp
             self.m.actuator_biasprm[:,1]=-kp
             self.m.actuator_biasprm[:,2]=-kd
         self.d.ctrl[:]=target
-        for _ in range(10): mujoco.mj_step(self.m,self.d)
+        for _ in range(10):
+            if before_substep is not None: before_substep()
+            mujoco.mj_step(self.m,self.d)

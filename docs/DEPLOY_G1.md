@@ -90,3 +90,27 @@ Faults include stale reception/frozen state ticks, invalid measurements, incompa
 ## Evidence and logs
 
 runner.jsonl stores package fingerprint, effective configuration/profile, state, frame, measured state, raw action, target, clamping, latency and failure reason. bridge.log records DDS/watchdog events. Deploy artifacts and logs are ignored by Git. No current result constitutes hardware verification; see VALIDATION.md for implementation-time results.
+
+## Interactive MuJoCo viewer (host 229 desktop)
+
+Run on a graphical desktop on 229 (a normal VS Code SSH terminal does not itself provide a graphical display):
+```bash
+cd /home/cqu023/blinkmimic
+OMP_NUM_THREADS=1 PYTHONPATH=src .venv/bin/python tools/view_deploy.py \
+  --bundle deploy_artifacts/lafan1_s0_1600_walk1_v2 --auto --speed 0.5
+```
+
+This is CPU simulation only, with the existing Controller, OnnxPolicy and CpuSim. It opens no DDS channels and cannot send robot commands. The solid robot is the simulation; the blue skeleton is the reference in world coordinates. Frame/state/inference/clamping information appears in the overlay. A fault freezes the simulation at detection and reports the offending joint when a position limit is exceeded. This is not a replay of the previous DDS trajectory.
+
+SPACE pauses/resumes, N advances one 20 ms control step, +/- changes wall-clock playback speed without changing simulated control/physics dt, R resets the session, G toggles the reference, F toggles camera following, D latches STOP. Mouse camera controls use the standard MuJoCo viewer.
+
+Without --auto: 1 prepares, 2 enters policy standby, B toggles simulated support, 3 requests playback after the stable window. Support is ON initially; release it in standby before playback. --auto prepares, enters standby, releases support after one second, then requests playback after five seconds. It does not bypass the controller's stability checks. If playback is refused, inspect the state rather than forcing it.
+
+A headless rendering smoke check (no window):
+```bash
+MUJOCO_GL=egl OMP_NUM_THREADS=1 PYTHONPATH=src .venv/bin/python tools/view_deploy.py \
+  --bundle deploy_artifacts/lafan1_s0_1600_walk1_v2 \
+  --headless --auto --steps 600 --screenshot /tmp/blink_viewer_smoke.png
+```
+
+The example bundle is the existing 1600-iteration candidate. Export another checkpoint with tools/export_deploy.py into a new bundle directory to view 3100/3500. Viewer success does not override the bundle's failed DDS physics acceptance.
