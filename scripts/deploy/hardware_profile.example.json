@@ -8,6 +8,5 @@
     0,
     0
   ],
-  "verified_on_this_robot": false,
-  "notes": "Example only: verify fixed IMU-to-pelvis rotation, motor order and physical robot before enabling."
+  "notes": "SuperMimic pelvis-IMU reference; identity mount assumed, not calibrated on this G1. Parameter file, not an arming certificate."
 }

@@ -29,9 +29,12 @@ def main():
         if not a.physics: simcmd+=["--fixture"]
         sim=subprocess.Popen(simcmd,stdout=simlog,stderr=subprocess.STDOUT,cwd=root)
         runner=None
+        def run_dir():
+            dirs=sorted((d/"run").glob("*/"))
+            return dirs[-1] if dirs else d/"run"
         def rows():
             try:
-                return [json.loads(l) for l in (d/"run/runner.jsonl").read_text().splitlines() if l.strip()]
+                return [json.loads(l) for l in (run_dir()/"runner.jsonl").read_text().splitlines() if l.strip()]
             except (OSError,ValueError): return []
         def wait_state(state,timeout=12):
             until=time.monotonic()+timeout
@@ -58,7 +61,7 @@ def main():
                 if runner.returncode!=0 or status["n_commands"]!=0: raise RuntimeError("read-only published or failed")
                 results[case]=dict(passed=True,commands_received=0)
                 continue
-            time.sleep(3); press(PREP); wait_state("HOLD")
+            time.sleep(3); press(PREP); wait_state("HOLD"); time.sleep(1.2)
             press(ARM); wait_state("STANDBY_PRE")
             if case=="normal":
                 # Release the support for physical stability, never for the replay fixture.
@@ -75,7 +78,7 @@ def main():
             elif case=="runner_exit":
                 runner.kill(); runner.wait()
                 time.sleep(.3)
-                log=(d/"run/bridge.log").read_text()
+                log=(run_dir()/"bridge.log").read_text()
                 if "runner gone" not in log and "WATCHDOG" not in log: raise RuntimeError("orphan not detected")
                 status=json.loads(controls.with_suffix(".status.json").read_text())
                 if status["kp"]!=[0.]*29 or status["kd"]!=[3.]*29: raise RuntimeError("no orphan damping on DDS")
@@ -95,7 +98,7 @@ def main():
             if status["kp"]!=[0.]*29 or status["kd"]!=[3.]*29: raise RuntimeError("no damping on DDS")
             reason=damp[0].get("reason","")
             expected={"normal":"remote stop","stale":"stale state","hot":"overtemperature",
-                      "nan":"policy action","timeout":"policy timeout"}[case]
+                      "nan":"policy action","timeout":"state expired during policy"}[case]
             if expected not in reason: raise RuntimeError("wrong fault: "+reason)
             results[case]=dict(passed=True,reason=reason,states=sorted(set(r.get("state","") for r in rs)))
         except Exception as exc:

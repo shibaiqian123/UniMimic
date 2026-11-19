@@ -26,3 +26,6 @@ results/
 
 /.deploy_deps/
 /.pytest_cache/
+
+/scripts/deploy/bridge/g1_sim_bridge
+/scripts/deploy/bridge/libg1sim_client.so

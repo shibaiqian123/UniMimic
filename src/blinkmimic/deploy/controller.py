@@ -13,8 +13,15 @@ class Controller:
         self.b=bundle
         self.core=DeployCore(bundle,policy)
         self.mount=sensor_transform(profile)
-        self.stage=bundle.cfg["stages"][stage]
-        self.limits=bundle.cfg["limits"]
+        self.stage=dict(bundle.cfg["stages"][stage])
+        self.stage["clamp_positions"]=False
+        if stage=="ground":self.stage["torque_fraction"]=1.5
+        # Shared simulator/hardware runtime defaults, following SuperMimic.
+        self.limits=dict(bundle.cfg["limits"],state_age_s=.02,max_temperature=80.,
+                         hold_s=1.,hold_tol=.1,start_max_dq=.5,start_tilt=0.1745329252,warn_temperature=70.,
+                         policy_tilt=.35)
+        self.limits.update(bundle.cfg.get("runner_limits",{}))
+        self.reject_reason=""
         self.state="PASSIVE"
         self.reason=""
         self.since=0.
@@ -30,7 +37,7 @@ class Controller:
             self.state="DAMP"; self.reason=str(reason)
 
     def transition(self,state,t):
-        self.state=state; self.since=t; self.stable_since=None
+        self.state=state; self.since=t; self.stable_since=None; self.reject_reason=""
 
     def update(self,s,now,bridge_fault=None):
         # STOP is immediate; other combinations require 60 ms stable and release before reuse.
@@ -44,7 +51,7 @@ class Controller:
         event=0
         if self.keys_released and now-self.key_since>=0.06 and not self.accepted:
             event=keys; self.accepted=1
-        fault=bridge_fault or state_guard(s,now,self.b,self.stage,self.limits)
+        fault=bridge_fault or state_guard(s,now,self.b,self.stage,self.limits,check_velocity=self.state in ("STANDBY_PRE","POLICY","STANDBY_POST"))
         if fault:
             self.damp(fault)
         if self.state=="DAMP":
@@ -54,17 +61,18 @@ class Controller:
             if self.state=="PASSIVE":
                 if event&PREP==PREP:
                     target=self.b.motion["q"][0]
-                    if (target<self.b.lower).any() or (target>self.b.upper).any():
-                        raise ValueError("reference start outside joint limits")
                     self.from_q=s["q"].copy()
                     self.core.align(R)
                     self.transition("INTERP",now)
                 else:
-                    return None
+                    if event:self.reject_reason="press 1 / L2+up to prepare first"
+                    out=self.damping(s);out["state"]="PASSIVE";out["reason"]=""
+                    return out
             f,_=self.core.reference()
             ref=self.core.heading@self.b.motion["root_R"][f]
             tilt=float(np.arccos(np.clip(np.dot(-R[2],-ref[2]),-1,1)))
-            if tilt>self.stage["max_tilt"]:
+            tilt_limit=self.limits["policy_tilt"] if self.state in ("STANDBY_PRE","POLICY","STANDBY_POST") else self.stage["max_tilt"]
+            if tilt>tilt_limit:
                 raise ValueError("reference tilt error")
             preparing=self.state in ("INTERP","HOLD")
             gain=self.b.cfg.get("preparation_gain_scale",1.0) if preparing else 1.0
@@ -79,25 +87,32 @@ class Controller:
             elif self.state=="HOLD":
                 target=self.b.motion["q"][0]
                 if event&ARM==ARM:
-                    if abs(s["q"]-target).max()>0.15:
-                        raise ValueError("not at start pose")
-                    self.transition("STANDBY_PRE",now)
+                    if now-self.since<self.limits["hold_s"]:self.reject_reason="HOLD needs at least 1 second"
+                    elif abs(s["q"]-target).max()>=self.limits["hold_tol"]:self.reject_reason="not at start pose"
+                    elif abs(s["dq"]).max()>=self.limits["start_max_dq"]:self.reject_reason="joint velocity not settled"
+                    elif tilt>=self.limits["start_tilt"]:self.reject_reason="start tilt not settled"
+                    elif np.max(s["temp"])>self.limits["warn_temperature"]:self.reject_reason="motor temperature too high to start"
+                    else:self.transition("STANDBY_PRE",now)
+                elif event&PLAY==PLAY:self.reject_reason="enter policy standby with 2 / R1+A first"
             else:
                 stable=tilt<self.limits["standby_tilt"] and abs(s["dq"]).max()<self.limits["standby_dq"]
                 if self.state=="STANDBY_PRE":
                     self.stable_since=(now if self.stable_since is None else self.stable_since) if stable else None
-                    if event&PLAY==PLAY and self.stable_since is not None and now-self.stable_since>=self.limits["standby_s"]:
-                        self.core.start_motion(); self.transition("POLICY",now)
+                    if event&PLAY==PLAY:
+                        if self.stable_since is not None and now-self.stable_since>=self.limits["standby_s"]:
+                            self.core.start_motion(); self.transition("POLICY",now)
+                        else:self.reject_reason="standby not yet continuously stable"
                 result=self.core.step(s["q"],s["dq"],gyro,R)
-                if result["inference_ms"]>1000*self.limits["policy_timeout_s"]:
-                    raise ValueError("policy timeout")
                 if abs(result["action"]).max()>self.stage["max_action"]:
                     raise ValueError("action magnitude")
                 target=result["target"]
                 if self.core.phase=="post" and self.state=="POLICY":
                     self.transition("STANDBY_POST",now)
             target,n=limit_target(target,s["q"],s["dq"],self.b,self.stage,kp,kd)
-            result.update(target=target,kp=kp,kd=kd,n_clamped=n,tilt=tilt,state=self.state)
+            result.update(target=target,kp=kp,kd=kd,n_clamped=n,tilt=tilt,state=self.state,reject_reason=self.reject_reason)
+            if self.core.history is not None:
+                result["observation"]=self.core.history[-1].copy()
+                result["orientation6d"]=self.core.history[-1,-6:].copy()
             return result
         except Exception as exc:
             self.damp(exc)

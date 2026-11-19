@@ -27,7 +27,9 @@ def main():
     ap.add_argument("--ckpt",required=True,type=Path)
     ap.add_argument("--motion",required=True,type=Path)
     ap.add_argument("--out",required=True,type=Path)
+    ap.add_argument("--preparation-gain-scale",type=float,default=4.,help="shared simulation/hardware preparation kp multiplier; kd uses its square root")
     a=ap.parse_args()
+    if not np.isfinite(a.preparation_gain_scale) or a.preparation_gain_scale<=0:ap.error("positive preparation gain required")
     if a.out.exists():
         raise ValueError("output must be a new directory")
     torch.set_num_threads(4)
@@ -71,7 +73,7 @@ def main():
               checkpoint_iteration=int(ck["iteration"]),checkpoint_sha256=digest(a.ckpt),
               source_motion_sha256=digest(a.motion),source_motion=str(a.motion.resolve()),
               sha256={n:digest(a.out/n) for n in ("policy.onnx","motion.npz")},
-              stages=STAGES,limits=LIMITS,preparation_gain_scale=4.0)
+              stages=STAGES,limits=LIMITS,preparation_gain_scale=a.preparation_gain_scale)
     (a.out/"deploy_config.json").write_text(json.dumps(meta,indent=2)+"\n")
     b=Bundle(a.out)
     ort=OnnxPolicy(b)

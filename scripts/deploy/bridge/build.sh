@@ -10,3 +10,9 @@ g++ -O2 -std=c++17 -Wall -Wno-unused-parameter -I"$SDK/include" -I"$SDK/thirdpar
     -Wl,--disable-new-dtags,-rpath,"$TL"
 g++ -O2 -std=c++17 -Wall -shared -fPIC g1_bridge_client.cpp -o libg1bridge_client.so -lrt
 echo "built $(pwd)/g1_bridge $(pwd)/libg1bridge_client.so ($ARCH)"
+
+g++ -O2 -std=c++17 -Wall -I"$SDK/include" -I"$SDK/thirdparty/include" -I"$SDK/thirdparty/include/ddscxx" \
+    g1_sim_bridge.cpp -o g1_sim_bridge -L"$SDK/lib/$ARCH" -lunitree_sdk2 -L"$TL" -lddscxx -lddsc -lpthread -lrt \
+    -Wl,--disable-new-dtags,-rpath,"$TL"
+g++ -O2 -std=c++17 -Wall -shared -fPIC g1_sim_client.cpp -o libg1sim_client.so -lpthread
+echo "built simulation adapter and client"

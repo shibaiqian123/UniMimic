@@ -52,12 +52,12 @@ def test_fault_latches(fault):
 def test_complete_state_sequence():
     c=Controller(bundle(),PROFILE,"ground",lambda h,g:np.zeros(29))
     states=set()
-    for i in range(550):
+    for i in range(650):
         t=i*.02; s=state(t)
         if .1<t<.4:s["keys"]=PREP
-        if 4.5<t<4.8:s["keys"]=ARM
-        if 8.<t<8.3:s["keys"]=PLAY
-        if t>10:s["keys"]=STOP
+        if 5.5<t<5.8:s["keys"]=ARM
+        if 9.<t<9.3:s["keys"]=PLAY
+        if t>12:s["keys"]=STOP
         c.update(s,t); states.add(c.state)
     assert states=={"PASSIVE","INTERP","HOLD","STANDBY_PRE","POLICY","STANDBY_POST","DAMP"}
 def test_nonfinite_policy_damps():
@@ -65,12 +65,12 @@ def test_nonfinite_policy_damps():
     c.core.align(np.eye(3)); c.state="STANDBY_PRE"
     c.update(state(1.),1.)
     assert c.state=="DAMP" and "policy action" in c.reason
-def test_timeout_damps():
-    import time
-    def slow(h,g): time.sleep(.025); return np.zeros(29)
-    c=Controller(bundle(),PROFILE,"ground",slow); c.core.align(np.eye(3)); c.state="STANDBY_PRE"
-    c.update(state(1.),1.)
-    assert c.state=="DAMP" and "timeout" in c.reason
+def test_stale_state_stops_before_inference():
+    c=Controller(bundle(),PROFILE,"ground",lambda h,g:np.zeros(29))
+    c.core.align(np.eye(3));c.state="STANDBY_PRE"
+    s=state(1.);s["t_rx"]=.9
+    c.update(s,1.)
+    assert c.state=="DAMP" and "stale" in c.reason
 
 def test_preparation_gains_and_policy_gains():
     b=bundle(); b.cfg["preparation_gain_scale"]=4.
@@ -96,7 +96,7 @@ def test_force_limit_uses_effective_gains():
 def test_preheld_button_does_not_arm():
     c=Controller(bundle(),PROFILE,"ground",lambda h,g:np.zeros(29))
     for t in (0.,.1,.2):
-        s=state(t); s["keys"]=PREP; assert c.update(s,t) is None
+        s=state(t); s["keys"]=PREP; assert c.update(s,t)["state"]=="PASSIVE"
     assert c.state=="PASSIVE"
     c.update(state(.3),.3)
     for t in (.4,.5):

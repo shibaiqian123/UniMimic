@@ -1,3 +1,5 @@
+> 历史记录：此文对应旧实现。当前流程与启动条件以 DEPLOY_G1.md 为准；旧报告不再阻止启动。
+
 # Deployment validation on host 229
 
 Implementation is present; this candidate is **NOT accepted for real-robot arming**. No real robot was connected or commanded. Host 32 was not modified.

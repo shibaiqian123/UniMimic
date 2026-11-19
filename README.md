@@ -262,3 +262,9 @@ See [deployment instructions](docs/DEPLOY_G1.md) for the BlinkMimic-specific exp
 ### Native MuJoCo sim2sim
 
 See [SIM2SIM](docs/SIM2SIM.md) for the official Unitree G1 torque-motor test, 1 kHz PD, delay/parameter sweeps, training-model comparison and interactive viewer. Runtime does not connect to DDS or hardware.
+
+GPU playback is available via `scripts/deploy/sim2sim.py --backend warp --cmd g1 --ckpt ...`; see the GPU section in docs/SIM2SIM.md. The g1 mode uses the training environment; g2/standby also support direct MuJoCo Warp on the official torque-motor model. Supply the matching --ckpt for CUDA policy inference.
+
+### 上机前最终 sim2sim
+
+使用 `scripts/deploy/sim2sim.py --cmd final`：CPU 官方模型、模拟传感器、DDS 和真机共用 runner。支持窗口键盘及独立终端键盘，不要求验证报告解锁。见 [最终流程与命令](docs/DEPLOY_G1.md)。

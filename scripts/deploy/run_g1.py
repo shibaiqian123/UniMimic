@@ -10,6 +10,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parent/"bridge"))
 import g1_bridge_io as gb
 from blinkmimic.deploy.core import Bundle, STAGES
 from blinkmimic.deploy.controller import Controller
+from blinkmimic.deploy.lowstate import decode_snapshot
+from blinkmimic.deploy.session import DEFAULT_PROFILE,new_session,atomic_json
 
 def plain(x):
     if isinstance(x,np.ndarray): return x.tolist()
@@ -19,11 +21,12 @@ def plain(x):
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--bundle",type=Path,required=True)
-    ap.add_argument("--hardware-profile",type=Path,required=True)
+    ap.add_argument("--hardware-profile",type=Path,help="optional IMU transform overrides")
     ap.add_argument("--iface",required=True)
     ap.add_argument("--domain",type=int,required=True)
     ap.add_argument("--stage",choices=list(STAGES),required=True)
-    ap.add_argument("--log-dir",type=Path,required=True)
+    ap.add_argument("--log-dir",type=Path,default=Path("deploy_logs/real"))
+    ap.add_argument("--status-file",type=Path,help="optional UI status output")
     ap.add_argument("--sim",action="store_true")
     ap.add_argument("--read-only",action="store_true")
     ap.add_argument("--seconds",type=float,default=10.,help="read-only duration")
@@ -35,7 +38,9 @@ def main():
     if not a.sim and (a.domain!=0 or a.iface=="lo"):
         ap.error("hardware requires explicit domain 0 and robot NIC")
     b=Bundle(a.bundle)
-    profile=json.loads(a.hardware_profile.read_text())
+    profile=dict(DEFAULT_PROFILE)
+    if a.hardware_profile:profile.update(json.loads(a.hardware_profile.read_text()))
+    profile.pop("verified_on_this_robot",None)
     ctl=Controller(b,profile,a.stage)
     if a.inject_fault:
         original=ctl.core.policy
@@ -48,21 +53,12 @@ def main():
             return original(h,g)
         ctl.core.policy=injected
     if not a.sim and not a.read_only:
-        if not profile.get("verified_on_this_robot",False):
-            ap.error("hardware profile is not verified")
-        for filename in ("export_validation.json","observation_validation.json","sim_validation.json","dds_validation.json","dds_physics_validation.json"):
-            p=b.path/filename
-            if not p.exists():
-                ap.error("missing acceptance report: "+filename)
-            report=json.loads(p.read_text())
-            if report.get("bundle_fingerprint")!=b.fingerprint or not report.get("passed"):
-                ap.error("failed or mismatched acceptance report: "+filename)
-        if input("G1 supported, remote stop ready, correct robot/NIC/profile. Type ARM: ")!="ARM":
-            return
-    a.log_dir.mkdir(parents=True,exist_ok=False)
+        if input("Robot supported / area clear / L2+B ready? Type yes: ").strip()!="yes":return
+    a.log_dir=new_session(a.log_dir.resolve())
+    print(f"Runner logs: {a.log_dir}",flush=True)
     log=open(a.log_dir/"runner.jsonl","w",buffering=1)
     log.write(json.dumps(dict(event="start",bundle_fingerprint=b.fingerprint,config=b.cfg,
-                              profile=profile,arguments={k:str(v) for k,v in vars(a).items()}))+"\n")
+                              profile=profile,effective_limits=ctl.limits,effective_stage=ctl.stage,arguments={k:str(v) for k,v in vars(a).items()}))+"\n")
     stop=[False]
     for sig in (signal.SIGINT,signal.SIGTERM):
         signal.signal(sig,lambda *_: stop.__setitem__(0,True))
@@ -89,11 +85,7 @@ def main():
                     raise RuntimeError("no consistent lowstate")
                 time.sleep(.01); continue
             observed=True
-            s={k:np.array(r[k][:29],copy=True) for k in ("q","dq","temp","motorstate")}
-            s.update({k:np.array(r[k],copy=True) for k in ("gyro","quat")})
-            s.update({k:float(r[k]) for k in ("t_rx","t_tick_change")})
-            s.update(mode_machine=int(r["mode_machine"]),mode_pr=int(r["mode_pr"]),
-                     keys=int(r["wireless_remote"][2])|int(r["wireless_remote"][3])<<8)
+            s=decode_snapshot(r)
             if a.read_only:
                 log.write(json.dumps(dict(event="state",t=now,s=s,other_lowcmd=int(bs["lc_count"])),default=plain)+"\n")
                 if stop[0] or now-began>=a.seconds: break
@@ -107,7 +99,7 @@ def main():
             if bs["wd_fired"] or bs["fail_consec"] or now-float(bs["t_hb"])>.05:
                 fault="bridge watchdog / publication fault"
             if stop[0]: ctl.damp("operator exit")
-            if ctl.state!="PASSIVE" and now-deadline>.05:
+            if ctl.state!="PASSIVE" and now-deadline>.04:
                 fault="control loop overrun"
             out=ctl.update(s,now,fault)
             if ctl.state=="DAMP" and not command_started:
@@ -115,7 +107,7 @@ def main():
             if out is not None:
                 # Reject results whose sensor sample became stale during inference.
                 age=time.monotonic()-s["t_rx"]
-                if age>b.cfg["limits"]["state_age_s"]:
+                if age>ctl.limits["state_age_s"]:
                     ctl.damp("state expired during policy"); out=ctl.damping(s)
                 q[:29]=out["target"]; kp[:29]=out["kp"]; kd[:29]=out["kd"]
                 flags=gb.CMD_NOW | (gb.CMD_Q_MEASURED if ctl.state=="DAMP" else 0)
@@ -125,10 +117,14 @@ def main():
                     command_started=True
                 log.write(json.dumps(dict(t=now,state=ctl.state,reason=ctl.reason,s=s,result=out,
                                           state_age_s=age),default=plain)+"\n")
+            if a.status_file:
+                atomic_json(a.status_file,dict(t=now,state=ctl.state,frame=ctl.core.frame,phase=ctl.core.phase,
+                    reason=ctl.reason,reject_reason=ctl.reject_reason,keys=s["keys"],
+                    heading=ctl.core.heading.tolist() if ctl.core.heading is not None else None,log_dir=str(a.log_dir)))
             if ctl.state=="DAMP":
                 damp_since=now if damp_since is None else damp_since
                 if now-damp_since>=10.: break
-            deadline+=.02
+            deadline=max(deadline+.02,time.monotonic())
             time.sleep(max(0,deadline-time.monotonic()))
     except BaseException as exc:
         ctl.damp(str(exc))

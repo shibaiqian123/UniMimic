@@ -96,6 +96,15 @@ class Plant:
             d.qpos[self.fq+2]+=self.ground_shift;mujoco.mj_forward(m,d)
         self.target=d.qpos[self.qidx].copy()
         if self.kind=="g1":d.ctrl[self.act]=self.target
+    def restart(self):
+        """Reset existing plant instead of rebuilding/compiling models on viewer R."""
+        self.pending.clear();self.steps=0
+        self.kp=self.b.kp.copy();self.kd=self.b.kd.copy()
+        self.torque_saturated=self.model_saturated=0
+        self.max_torque_ratio=self.max_velocity_ratio=0.
+        self.reset(reference_velocity=(self.kind=="g1"))
+        if hasattr(self,"sync_reset"):self.sync_reset()
+
     def state(self):
         d=self.d
         return (d.qpos[self.qidx].copy(),d.qvel[self.vidx].copy(),
@@ -133,11 +142,11 @@ class Plant:
             mujoco.mj_step(m,d);self.steps+=1
 
 class Experiment:
-    def __init__(self,b,plant,cmd,stage="ground",diagnostic=False,standby_s=5.):
+    def __init__(self,b,plant,cmd,stage="ground",diagnostic=False,standby_s=5.,policy=None):
         self.b=b;self.plant=plant;self.cmd=cmd;self.stage=b.cfg["stages"][stage]
         self.diagnostic=diagnostic;self.standby_s=standby_s
-        self.controller=Controller(b,PROFILE,stage) if cmd=="standby" else None
-        self.core=self.controller.core if self.controller else DeployCore(b)
+        self.controller=Controller(b,PROFILE,stage,policy=policy) if cmd=="standby" else None
+        self.core=self.controller.core if self.controller else DeployCore(b,policy=policy)
         if not self.controller:self.core.align(rotation(plant.state()[3]));self.core.start_motion()
         self.time=0.;self.frame=0;self.state="PASSIVE" if self.controller else "POLICY"
         self.events=[];self.records=[];self.finished=False;self.failed=False;self.support=False
@@ -223,7 +232,13 @@ class Experiment:
                     torque_saturation_samples=self.plant.torque_saturated,
                     model_ctrl_saturation_samples=self.plant.model_saturated,
                     max_requested_torque_ratio=self.plant.max_torque_ratio,max_velocity_ratio=self.plant.max_velocity_ratio,
-                    scope="CPU MuJoCo sim2sim, no DDS or hardware; not the 40-clip training return")
+                    physics_backend="mujoco_warp" if hasattr(self.plant,"gpu_device") else "mujoco_cpu",
+                    physics_device=str(getattr(self.plant,"gpu_device","cpu")),
+                    policy_device=str(getattr(self.core.policy,"device","cpu")),
+                    cuda_graph=getattr(self.plant,"graph",None) is not None,
+                    graph_fallback_reason=getattr(self.plant,"capture_error",None),
+                    backend_warnings=getattr(self.plant,"backend_warnings",[]),
+                    scope="official-model sim2sim, no DDS or hardware; not the 40-clip training return")
     def save(self,path,extra=None):
         path=Path(path);path.mkdir(parents=True,exist_ok=True)
         report=self.report();report.update(extra or {})

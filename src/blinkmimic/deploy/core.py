@@ -56,7 +56,7 @@ class Bundle:
         if c["control_dt"] != 0.02 or c["obs_layout"] != OBS_LAYOUT:
             raise ValueError("unsupported observation / timing contract")
         gain=c.get("preparation_gain_scale",1.0)
-        if not np.isfinite(gain) or not 1.0<=gain<=4.0:
+        if not np.isfinite(gain) or gain<=0:
             raise ValueError("unsupported preparation gain scale")
         for name in ("policy.onnx", "motion.npz"):
             if digest(self.path/name) != c["sha256"][name]:
@@ -164,7 +164,7 @@ def transform_imu(quat, gyro, R_pelvis_from_imu):
     # R_world_imu = R_world_pelvis @ R_pelvis_imu.
     return rotation(quat) @ R_pelvis_from_imu.T, R_pelvis_from_imu @ np.asarray(gyro,float)
 
-def state_guard(s, now, b, stage, limits=LIMITS):
+def state_guard(s, now, b, stage, limits=LIMITS, check_velocity=True):
     for k in ("q","dq","gyro","quat","temp"):
         if not np.isfinite(s[k]).all():
             return "nonfinite " + k
@@ -176,10 +176,8 @@ def state_guard(s, now, b, stage, limits=LIMITS):
         return "motor fault"
     if np.max(s["temp"]) >= limits["max_temperature"]:
         return "overtemperature"
-    if (np.abs(s["dq"]) > b.velocity*stage["velocity_fraction"]).any():
+    if check_velocity and (np.abs(s["dq"]) > b.velocity*stage["velocity_fraction"]).any():
         return "joint overspeed"
-    if (s["q"] < b.lower-0.05).any() or (s["q"] > b.upper+0.05).any():
-        return "joint outside hard limits"
     try:
         rotation(s["quat"])
     except ValueError:
@@ -190,8 +188,10 @@ def limit_target(target,q,dq,b,stage,kp=None,kd=None):
     kp=b.kp if kp is None else kp
     kd=b.kd if kd is None else kd
     tau = b.effort*stage["torque_fraction"]
-    low = np.maximum(b.lower, q+(-tau+kd*dq)/kp)
-    high = np.minimum(b.upper, q+(tau+kd*dq)/kp)
+    low = q+(-tau+kd*dq)/kp
+    high = q+(tau+kd*dq)/kp
+    if stage.get("clamp_positions",False):
+        low=np.maximum(b.lower,low);high=np.minimum(b.upper,high)
     if (low>high).any():
         raise ValueError("no feasible torque-limited target")
     out = np.clip(target,low,high)

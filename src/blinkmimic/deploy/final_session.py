@@ -1,0 +1,146 @@
+"""Final CPU sim2sim supervisor. Uses the SAME hardware runner over isolated DDS."""
+import json,os,signal,socket,subprocess,sys,time
+from pathlib import Path
+from .core import Bundle
+from .session import new_session,atomic_json,DEFAULT_PROFILE
+from .sim_ipc import SimIPC,BRIDGE
+
+ROOT=Path(__file__).resolve().parents[3]
+def send(path,event):
+    with socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM) as s:s.sendto(json.dumps(event).encode(),str(path/"buttons.sock"))
+def read(path):
+    try:return json.loads(Path(path).read_text())
+    except (OSError,ValueError):return {}
+def stop_process(p,timeout=3):
+    if p is None or p.poll() is not None:return
+    p.terminate()
+    try:p.wait(timeout)
+    except subprocess.TimeoutExpired:p.kill();p.wait()
+
+def run(a):
+    if a.backend!="cpu":raise ValueError("--cmd final uses CPU official-model physics; GPU is diagnostic")
+    if not a.unitree_xml:raise ValueError("--unitree-xml is required")
+    b=Bundle(a.bundle)
+    session=new_session(a.out.resolve())
+    meta=dict(kind="blink_final_sim",domain=a.dds_domain,iface="lo",bundle=str(a.bundle.resolve()),
+              bundle_fingerprint=b.fingerprint,unitree_xml=str(a.unitree_xml.resolve()),
+              stage=a.stage,sensor_profile=DEFAULT_PROFILE,physics_hz=1000,lowstate_hz=1000,
+              lowcmd_hz=500,policy_hz=50,auto=a.auto)
+    atomic_json(session/"session.json",meta)
+    ipc=SimIPC(session/"sim.mmap",create=True)
+    print(f"FINAL SIM SESSION: {session}",flush=True)
+    print(f"Keyboard: {sys.executable} scripts/deploy/sim_keyboard.py --session {session}",flush=True)
+    env=dict(os.environ,PYTHONPATH=str(ROOT/"src"),OMP_NUM_THREADS="1")
+    children=[];files=[]
+    def spawn(name,cmd):
+        f=open(session/(name+".log"),"w");files.append(f)
+        p=subprocess.Popen(cmd,cwd=ROOT,env=env,stdout=f,stderr=subprocess.STDOUT)
+        children.append(p);return p
+    terminate=[False]
+    old={}
+    for sig in (signal.SIGINT,signal.SIGTERM):
+        old[sig]=signal.signal(sig,lambda *_:terminate.__setitem__(0,True))
+    physics=bridge=runner=window=None;seen=set();failure="";stop_sent=False;stop_at=None
+    since=time.monotonic();state_since=since;previous=None;last_action=0.;policy_support=False
+    auto_events=[];post_support_since=None
+    try:
+        physics=spawn("physics",[sys.executable,"-u","-m","blinkmimic.deploy.final_physics","--session",str(session)])
+        deadline=time.monotonic()+15
+        while not (session/"buttons.sock").exists():
+            if physics.poll() is not None or time.monotonic()>deadline:raise RuntimeError("physics startup failed; see physics.log")
+            time.sleep(.05)
+        bridge=spawn("sim_bridge",[str(BRIDGE/"g1_sim_bridge"),str(session/"sim.mmap"),str(a.dds_domain)])
+        runner=spawn("runner",[sys.executable,"-u",str(ROOT/"scripts/deploy/run_g1.py"),
+            "--bundle",str(a.bundle.resolve()),"--iface","lo","--domain",str(a.dds_domain),"--sim",
+            "--stage",a.stage,"--log-dir",str(session/"runner"),"--status-file",str(session/"runner_status.json")])
+        if a.viewer:
+            window=spawn("viewer",[sys.executable,"-u","-m","blinkmimic.deploy.final_view","--session",str(session),
+                "--gl-renderer",a.gl_renderer,"--render-hz",str(a.render_hz)])
+        atomic_json(session/"processes.json",dict(physics=physics.pid,sim_bridge=bridge.pid,runner=runner.pid,
+                                                viewer=window.pid if window is not None else None))
+        while True:
+            now=time.monotonic();rs=read(session/"runner_status.json");ps=read(session/"physics_status.json")
+            state=rs.get("state")
+            if state and state!=previous:
+                print(f"{state}: {rs.get('reason') or rs.get('reject_reason','')}",flush=True)
+                previous=state;state_since=now;seen.add(state)
+            if state=="POLICY" and ps.get("support"):policy_support=True
+            if a.auto and not stop_sent and now-last_action>.4:
+                key=None
+                if state=="PASSIVE":key="1"
+                elif state=="HOLD" and now-state_since>1.2:key="2"
+                elif state=="STANDBY_PRE":
+                    if now-state_since>1 and ps.get("support"):key="B"
+                    elif now-state_since>5:key="3"
+                elif state=="STANDBY_POST" and now-state_since>5:
+                    if not ps.get("support"):
+                        key="B";post_support_since=None
+                    else:
+                        post_support_since=post_support_since or now
+                        if now-post_support_since>1.:key="D";stop_sent=True;stop_at=now
+                if key:
+                    send(session,dict(type="key",key=key));last_action=now
+                    auto_events.append(dict(t=now,key=key,state=state))
+            if state=="DAMP":
+                stop_sent=True;stop_at=stop_at or now
+                reason=rs.get("reason","")
+                if reason!="remote stop" and reason!="operator exit":failure=reason
+            request_stop=terminate[0] or (a.duration is not None and now-since>=a.duration)
+            if window is not None and window.poll() is not None:
+                request_stop=True
+                if window.returncode:failure=f"viewer exited {window.returncode}; see viewer.log"
+            if request_stop and not stop_sent:
+                send(session,dict(type="key",key="D"));stop_sent=True;stop_at=now
+            if stop_sent and state!="DAMP" and now-last_action>.4:
+                # A stop pressed during the runner's startup observation must not be lost.
+                send(session,dict(type="key",key="D"));last_action=now
+            if physics.poll() is not None or bridge.poll() is not None:
+                failure="simulation process exited unexpectedly";break
+            if runner.poll() is not None:
+                if runner.returncode:
+                    failure=f"runner exited {runner.returncode}; see runner.log"
+                    # Keep the simulated plant/receiver alive to observe the real bridge's orphan damping.
+                    time.sleep(10.5)
+                break
+            if stop_at and now-stop_at>15:
+                failure=failure or "runner did not finish after stop";break
+            # Auto mode must not wait forever for a motion that cannot pass normal start conditions.
+            if a.auto and state in ("HOLD","STANDBY_PRE") and now-state_since>30 and not stop_sent:
+                failure=rs.get("reject_reason") or "start condition did not become ready"
+                send(session,dict(type="key",key="D"));stop_sent=True;stop_at=now
+            time.sleep(.02)
+    except Exception as exc:
+        failure=str(exc)
+        try:send(session,dict(type="key",key="D"));time.sleep(.2)
+        except OSError:pass
+    finally:
+        if runner is not None and runner.poll() is None:stop_process(runner,12)
+        stop_process(bridge);stop_process(window)
+        try:send(session,dict(type="quit"))
+        except OSError:pass
+        if physics is not None:
+            try:physics.wait(8)
+            except subprocess.TimeoutExpired:stop_process(physics)
+        counts=ipc.counts();ipc.close()
+        for f in files:f.close()
+        for sig,handler in old.items():signal.signal(sig,handler)
+    rs=read(session/"runner_status.json");pr=read(session/"physics_report.json")
+    completed="STANDBY_POST" in seen
+    required={"PASSIVE","INTERP","HOLD","STANDBY_PRE","POLICY","STANDBY_POST","DAMP"}
+    flow=completed and required.issubset(seen) and not failure and not policy_support
+    report=dict(session=str(session),bundle_fingerprint=b.fingerprint,states=sorted(seen),
+        motion_completed=completed,flow_valid=flow,policy_had_support=policy_support,
+        timing_valid=bool(pr.get("timing_valid")),passed=flow and bool(pr.get("timing_valid")),
+        reason=failure or ("" if completed else "operator stopped before full motion"),
+        sensor_calibrated=False,hardware_verified=False,physics=pr,
+        dds=dict(lowstate_published=counts[0],lowcmd_received=counts[1],crc_bad=counts[2],write_fail=counts[3]),
+        runner_log_dir=rs.get("log_dir"),auto_events=auto_events,
+        scope="shared real runner, modeled sensors, official CPU physics; no real hardware")
+    from .final_evaluate import evaluate
+    tracking=evaluate(session,rs["log_dir"],b) if rs.get("log_dir") else {"available":False,"passed":False}
+    report["tracking"]=tracking
+    report["passed"]=bool(report["passed"] and tracking.get("passed") and not tracking.get("policy_support_samples",0) and tracking.get("stop_stage",{}).get("passed",False))
+    if counts[2] or counts[3]:report["passed"]=False
+    atomic_json(session/"report.json",report)
+    print(json.dumps(report,indent=2),flush=True)
+    if not report["passed"]:raise SystemExit(1 if failure else 2)
