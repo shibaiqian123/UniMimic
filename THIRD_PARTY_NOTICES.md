@@ -69,3 +69,6 @@ checkpoints) are not covered by this repository's MIT License.
 DDS bridge sources and wire client in scripts/deploy/bridge, plus adapted state parsing/state-machine behavior, derive from NJU-R-L-Group-Embodied-Lab/SuperMimic-Repro-Sim2Real (inspected commit 0905de4). Copyright (c) 2026 Yuxi Liu and Hongyu Ding. MIT license reproduced in scripts/deploy/bridge/LICENSE.
 
 The final sim2sim sensor estimator in src/blinkmimic/deploy/imu_model.py is adapted from the same SuperMimic MIT-licensed project. The simulation DDS adapter reuses Unitree's CRC routine; its BSD-3-Clause license is included in scripts/deploy/bridge/LICENSES/unitree_sdk2-BSD-3-Clause.txt.
+
+## Finite scalar quantization
+The scalar bounding/rounding formula in src/blinkmimic/latent.py follows lucidrains/vector-quantize-pytorch 1.27.15 (MIT; licenses/vector-quantize-pytorch-MIT.txt). SONIC configuration reference: NVlabs/GR00T-WholeBodyControl gear_sonic/config/actor_critic/universal_token/all_mlp_v1.yaml (2 tokens, 32 components, 32 levels). No SONIC model weights are copied. Reference package is test-only and not a deployment dependency.

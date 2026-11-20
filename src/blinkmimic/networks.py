@@ -208,15 +208,22 @@ class WorldModel(nn.Module):
 
 
 class Policy(nn.Module):
-    """a = dec(enc(g), o_{t-9:t}); deterministic, latent z in R^32 bounded by tanh.
+    """a = dec(enc(g), o_{t-9:t}); legacy tanh32 or matched continuous64 / FSQ64.
 
     ``ref_skip`` = (offset, q0, alpha) (--pi_ref_skip): reference-action skip connection,
     a = (q_ref(f+1) - q0) / alpha + dec(...), with q_ref(f+1) read from the raw (unnormalized) goal vector at
     ``offset``; the network only learns the correction to tracking the reference with the PD controller."""
 
     def __init__(self, obs_dim: int, goal_dim: int, act_dim: int, hist: int = 10, z_dim: int = 32,
-                 enc_hidden=(2048, 1024, 512, 256), dec_hidden=(2048, 1024, 512, 256), ref_skip=None):  # fmt: skip
+                 enc_hidden=(2048, 1024, 512, 256), dec_hidden=(2048, 1024, 512, 256), ref_skip=None, latent_mode="continuous32"):  # fmt: skip
         super().__init__()
+        from .latent import spec
+        self.latent_mode = latent_mode
+        self.latent_spec = spec(latent_mode, ref_skip is not None)
+        if latent_mode != "continuous32":
+            z_dim = 64
+            # A persistent marker prevents same-shaped continuous64/FSQ checkpoints mixing.
+            self.register_buffer("_latent_kind", torch.tensor(1. if latent_mode=="continuous64" else 2.))
         self.hist = hist
         self.ref_off = None
         if ref_skip is not None:
@@ -245,7 +252,35 @@ class Policy(nn.Module):
 
     def encode(self, goal: torch.Tensor) -> torch.Tensor:
         """Motion latent z from the goal features (reference only, independent of the robot state)."""
-        return torch.tanh(run_mlp(self.enc, self.goal_norm(goal)))
+        if self.latent_mode == "continuous32":
+            return torch.tanh(self.enc_raw(goal))
+        return self.encode_tokens(goal).flatten(-2)
+
+    def enc_raw(self, goal):
+        return run_mlp(self.enc, self.goal_norm(goal))
+
+    def encode_tokens(self, goal):
+        from .latent import bound, quantize_bounded, HALF
+        if self.latent_mode == "continuous32":
+            return torch.tanh(self.enc_raw(goal)).unflatten(-1, (1,32))
+        u = bound(self.enc_raw(goal))
+        z = quantize_bounded(u) if self.latent_mode=="fsq64" else u / HALF
+        return z.unflatten(-1, (2,32))
+
+    def decode_tokens(self, obs_history, tokens):
+        if self.ref_off is not None:
+            raise ValueError("reference-skip policy cannot decode from tokens alone")
+        if tokens.shape[-2:] != tuple(self.latent_spec["token_shape"]):
+            raise ValueError("wrong token shape")
+        o = self.obs_norm(obs_history).flatten(-2)
+        return run_mlp(self.dec, torch.cat((tokens.flatten(-2), o), -1))
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        key = prefix + "_latent_kind"
+        if hasattr(self, "_latent_kind") and key in state_dict:
+            if int(state_dict[key]) != int(self._latent_kind):
+                raise ValueError("checkpoint latent mode mismatch")
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
 
 # Switches of the development code that this release does not have, with their "off" value. Run arguments (args.json,
@@ -276,7 +311,9 @@ def check_pruned(a_: dict, nets_only: bool = False, what: str = "this run") -> N
 def policy_kwargs(a_: dict, robot) -> dict:
     """Policy keyword arguments of a run with the training arguments ``a_``."""
     check_pruned(a_, nets_only=True)
-    return {"ref_skip": policy_ref_skip(a_, robot)}
+    from .latent import validate_args
+    spec = validate_args(a_)
+    return {"ref_skip": policy_ref_skip(a_, robot), "latent_mode": spec["mode"]}
 
 
 def policy_ref_skip(a_: dict, robot):

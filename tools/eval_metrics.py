@@ -16,11 +16,14 @@ plus normalized return and failed clips.
 """
 
 import argparse
+import hashlib
+from pathlib import Path
 import json
 import os
 
 parser = argparse.ArgumentParser()
 parser.add_argument("ckpts", nargs="+")
+parser.add_argument("--motion_dir", type=str, default=None)
 parser.add_argument("--robot", type=str, default="g1")
 parser.add_argument("--out", type=str, default="results/metrics")
 args = parser.parse_args()
@@ -43,7 +46,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 dev = "cuda:0"
 robot = get_robot(args.robot)
 kin = Kinematics(robot, dev)
-motion = MotionLib.from_dir(robot.motion_dir, robot, kin, dev)
+motion = MotionLib.from_dir(args.motion_dir or robot.motion_dir, robot, kin, dev)
 mdp = MDP(kin, motion, torch.tensor(robot.default_joint_pos_list(), device=dev), XiLayout(robot, dev).dim, robot.sensing)
 C = len(motion.names)
 FEET = [robot.tracked_bodies.index(b) for b in ("left_ankle_roll_link", "right_ankle_roll_link")]
@@ -69,9 +72,10 @@ def run(cks):
     clip_of = torch.arange(N, device=dev) % C
     env.reset(torch.arange(N, device=dev), motion.clip_start[clip_of].clone())
     clip_end = motion.clip_end[clip_of]
-    keys = ("n", "ret", "pos", "ori", "root", "joint", "slip", "slip_n", "ref_slip", "ref_slip_n", "c_ok", "c_n", "pen")
+    keys = ("n", "ret", "pos", "ori", "root", "joint", "slip", "slip_n", "ref_slip", "ref_slip_n", "c_ok", "c_n", "pen", "action_delta", "delta_n")
     acc = {k: torch.zeros(N, device=dev) for k in keys}
     hist, a = None, torch.zeros(N, robot.num_joints, device=dev)
+    previous=None
     while not bool(env.done_eval.all()):
         o = env.observe()
         hist = o.unsqueeze(1).repeat(1, Hh, 1) if hist is None else torch.cat((hist[:, 1:], o.unsqueeze(1)), 1)
@@ -80,6 +84,10 @@ def run(cks):
             sl = slice(m * C, (m + 1) * C)
             a[sl] = pi(hist[sl], g[sl])
         alive = (~env.done_eval).float()
+        if previous is not None:
+            acc["action_delta"] += alive * (a-previous).square().mean(-1)
+            acc["delta_n"] += alive
+        previous=a.clone()
         f1 = env.f + 1
         out = env.step(a)
         S1 = env.state()
@@ -108,6 +116,7 @@ def run(cks):
         s = {k: v[m * C : (m + 1) * C].sum().item() for k, v in acc.items()}
         n = s["n"]
         res.append({
+            "action_delta_rms": (s["action_delta"]/max(s["delta_n"],1))**.5,
             "norm_return": (acc["ret"][m * C : (m + 1) * C] / ((clip_len[m * C : (m + 1) * C] - 1).float() * MAX_STEP_REWARD)).mean().item(),
             "n_failed": int(env.failed_eval[m * C : (m + 1) * C].sum().item()),
             "body_pos_cm": 100 * (s["pos"] / n) ** 0.5,
@@ -122,9 +131,11 @@ def run(cks):
     return res
 
 
-cks = [torch.load(p, map_location=dev) for p in args.ckpts]
+cks = [torch.load(p, map_location=dev, weights_only=False) for p in args.ckpts]
+contracts={(ck["args"]["hist"],ck["args"]["goal_frames"],ck["args"].get("amp","none")) for ck in cks}
+if len(contracts)!=1:raise ValueError("comparison requires equal history, goal window and precision")
 res = run(cks)
-cols = ["norm_return", "n_failed", "body_pos_cm", "body_ori_deg", "root_pos_cm", "joint_deg", "slip_cm_s", "ref_slip_cm_s", "contact_acc", "pen_mm"]
+cols = ["action_delta_rms", "norm_return", "n_failed", "body_pos_cm", "body_ori_deg", "root_pos_cm", "joint_deg", "slip_cm_s", "ref_slip_cm_s", "contact_acc", "pen_mm"]
 lines = ["| checkpoint | train h | " + " | ".join(cols) + " |", "|---" * (len(cols) + 2) + "|"]
 for p, ck, r in zip(args.ckpts, cks, res):
     name = f"{os.path.basename(os.path.dirname(p))}/{os.path.basename(p)}"
@@ -134,3 +145,11 @@ print(table)
 os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 open(args.out + ".md", "w").write(table + "\n")
 json.dump({p: r for p, r in zip(args.ckpts, res)}, open(args.out + ".json", "w"), indent=1)
+
+manifest = dict(protocol="clip-start-no-noise-no-DR", motion_dir=str(Path(args.motion_dir or robot.motion_dir).resolve()),
+                files=[dict(name=p.name,sha256=hashlib.sha256(p.read_bytes()).hexdigest())
+                       for p in sorted(Path(args.motion_dir or robot.motion_dir).glob(robot.motion_glob))],
+                checkpoints=[dict(path=str(Path(p).resolve()),sha256=hashlib.sha256(Path(p).read_bytes()).hexdigest(),
+                                  latent_spec=ck["args"].get("latent_spec"),seed=ck["args"].get("seed"),
+                                  iteration=ck["iteration"]) for p,ck in zip(args.ckpts,cks)])
+json.dump(manifest,open(args.out+".manifest.json","w"),indent=2)

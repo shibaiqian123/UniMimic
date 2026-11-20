@@ -42,7 +42,7 @@ class WarpRunner:
         self.env=TrackingSim(make_sim(robot),num_envs,robot,self.motion,mdp,str(self.device),
                              eval_mode=True,randomize=False)
         widths=lambda k:tuple(map(int,cfg.get(k,"2048,1024,512,256").split(",")))
-        self.pi=Policy(99,730,29,hist=10,z_dim=32,enc_hidden=widths("enc_hidden"),
+        self.pi=Policy(99,730,29,hist=10,enc_hidden=widths("enc_hidden"),
                        dec_hidden=widths("dec_hidden"),**policy_kwargs(cfg,robot)).to(self.device).eval()
         self.pi.load_state_dict(ck["pi"],strict=True)
         self.ids=torch.arange(num_envs,device=self.device)

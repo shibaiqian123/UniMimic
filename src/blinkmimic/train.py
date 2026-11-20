@@ -131,7 +131,11 @@ parser.add_argument("--log_dir", type=str, default=os.path.join(REPO, "logs", "r
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--resume", type=str, default=None)
 parser.add_argument("--amp", type=str, default="bf16", choices=["none", "bf16"], help="autocast dtype for MLP matmuls")
+parser.add_argument("--latent-mode", "--latent_mode", dest="latent_mode",
+                    choices=["continuous32","continuous64","fsq64"], default="continuous32")
 args = parser.parse_args()
+from blinkmimic.latent import validate_args, check_resume
+args.latent_spec = validate_args(vars(args))
 
 if args.tensorboard:
     try:
@@ -234,6 +238,7 @@ if args.resume:
     ck = torch.load(args.resume, map_location=dev, weights_only=False)
     assert "opt_pi" in ck, f"--resume {args.resume}: no optimizer state (use last.pt)"
     check_pruned(ck.get("args", {}), what=args.resume)
+    check_resume(ck.get("args", {}), vars(args))
     wm.load_state_dict(ck["wm"]), pi.load_state_dict(ck.get("pi_live", ck["pi"])), critic.load_state_dict(ck["critic"])
     load_opt_states(ck)
     start_it, wall_offset, sim_steps = ck["iteration"], ck["wall_time"], ck["sim_steps"]
@@ -971,6 +976,21 @@ for it in range(start_it, args.iterations):
         if tb_writer is not None:
             for name, value in zip(tb_columns[1:], (row + extra)[1:]):
                 tb_writer.add_scalar(f"train/{name}", value, global_step=it + 1)
+        if args.latent_mode != "continuous32":
+            from blinkmimic.latent import statistics
+            with torch.no_grad():
+                fsq_goal = motion.goal(torch.linspace(0, motion.num_frames-1, min(256, motion.num_frames), device=dev).long(), K)
+                latent_stats = statistics(pi, fsq_goal)
+            with open(os.path.join(args.log_dir, "latent_metrics.jsonl"), "a") as latent_log:
+                latent_log.write(json.dumps(dict(iteration=it+1, mode=args.latent_mode, **latent_stats))+"\n")
+            if tb_writer is not None:
+                tb_writer.add_scalar("latent/quantization_mse", latent_stats["quantization_mse"], it+1)
+                if latent_stats["encoder_grad_norm"] is not None:
+                    tb_writer.add_scalar("latent/encoder_grad_norm", latent_stats["encoder_grad_norm"], it+1)
+                for dim, (used, sat) in enumerate(zip(latent_stats["used_levels"], latent_stats["saturation"])):
+                    tb_writer.add_scalar(f"latent/used_levels/{dim}", used, it+1)
+                    tb_writer.add_scalar(f"latent/utilization/{dim}", used/32., it+1)
+                    tb_writer.add_scalar(f"latent/saturation/{dim}", sat, it+1)
         deadline = args.lr_decay_by > 0 and it + 1 >= args.lr_decay_by
         if args.lr_decay_ret > 0 and DECAY_AT[0] is None and (row[12] >= args.lr_decay_ret or deadline):
             DECAY_AT[0] = it + 1

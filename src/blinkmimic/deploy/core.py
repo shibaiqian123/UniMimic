@@ -49,16 +49,20 @@ class Bundle:
         self.path = Path(path)
         self.cfg = json.loads((self.path / "deploy_config.json").read_text())
         c = self.cfg
-        if c["schema"] != "blinkmimic_single_motion_v1" or c["joint_names"] != JOINTS:
+        if c["schema"] not in ("blinkmimic_single_motion_v1","blinkmimic_single_motion_v2") or c["joint_names"] != JOINTS:
             raise ValueError("unsupported schema / motor order")
-        if (c["history"], c["goal_frames"], c["obs_dim"], c["goal_dim"], c["latent_dim"]) != (10,10,99,730,32):
+        v2=c["schema"]=="blinkmimic_single_motion_v2"
+        if v2:
+            from blinkmimic.latent_contract import validate_v2
+            validate_v2(c)
+        if (c["history"], c["goal_frames"], c["obs_dim"], c["goal_dim"], c["latent_dim"]) != (10,10,99,730,64 if v2 else 32):
             raise ValueError("unsupported model dimensions")
         if c["control_dt"] != 0.02 or c["obs_layout"] != OBS_LAYOUT:
             raise ValueError("unsupported observation / timing contract")
         gain=c.get("preparation_gain_scale",1.0)
         if not np.isfinite(gain) or gain<=0:
             raise ValueError("unsupported preparation gain scale")
-        for name in ("policy.onnx", "motion.npz"):
+        for name in (("policy.onnx", "motion.npz", "motion_encoder.onnx", "decoder.onnx") if v2 else ("policy.onnx", "motion.npz")):
             if digest(self.path/name) != c["sha256"][name]:
                 raise ValueError("bundle hash mismatch: " + name)
         for key in ("q0","scale","kp","kd","effort","lower","upper","velocity"):

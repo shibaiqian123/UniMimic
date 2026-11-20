@@ -169,7 +169,7 @@ class TorchCudaPolicy:
         ck=torch.load(ckpt,map_location="cpu",weights_only=False);c=ck["args"]
         if c["hist"]!=10 or c["goal_frames"]!=10:raise ValueError("unsupported checkpoint horizons")
         widths=lambda k:tuple(map(int,c.get(k,"2048,1024,512,256").split(",")))
-        self.net=Policy(99,730,29,hist=10,z_dim=32,enc_hidden=widths("enc_hidden"),dec_hidden=widths("dec_hidden"),
+        self.net=Policy(99,730,29,hist=10,enc_hidden=widths("enc_hidden"),dec_hidden=widths("dec_hidden"),
                         **policy_kwargs(c,get_robot("g1"))).to(self.device).eval()
         self.net.load_state_dict(ck["pi"],strict=True)
     def __call__(self,h,g):

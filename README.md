@@ -268,3 +268,6 @@ GPU playback is available via `scripts/deploy/sim2sim.py --backend warp --cmd g1
 ### 上机前最终 sim2sim
 
 使用 `scripts/deploy/sim2sim.py --cmd final`：CPU 官方模型、模拟传感器、DDS 和真机共用 runner。支持窗口键盘及独立终端键盘，不要求验证报告解锁。见 [最终流程与命令](docs/DEPLOY_G1.md)。
+
+## 64D Motion tokens
+Continuous64 / FSQ64 training, split ONNX export and legacy32 compatibility: [FSQ64](docs/FSQ64.md). Existing 32D hardware bundles remain unchanged.
