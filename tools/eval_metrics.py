@@ -17,6 +17,7 @@ plus normalized return and failed clips.
 
 import argparse
 import hashlib
+import time
 from pathlib import Path
 import json
 import os
@@ -76,6 +77,9 @@ def run(cks):
     acc = {k: torch.zeros(N, device=dev) for k in keys}
     hist, a = None, torch.zeros(N, robot.num_joints, device=dev)
     previous=None
+    started=last_progress=time.monotonic()
+    steps=0
+    print(f"Evaluation started: {M} checkpoints x {C} clips = {N} environments", flush=True)
     while not bool(env.done_eval.all()):
         o = env.observe()
         hist = o.unsqueeze(1).repeat(1, Hh, 1) if hist is None else torch.cat((hist[:, 1:], o.unsqueeze(1)), 1)
@@ -110,6 +114,14 @@ def run(cks):
         acc["c_n"] += alive * 2
         acc["pen"] += alive * (FLAT_Z - fz).clamp(min=0).sum(-1) / 2
         env.f = torch.minimum(env.f, clip_end - 1)
+        steps+=1
+        now=time.monotonic()
+        if now-last_progress>=5:
+            done=env.done_eval.reshape(M,C).sum(-1).tolist()
+            failed=env.failed_eval.reshape(M,C).sum(-1).tolist()
+            print(f"[eval] steps={steps} elapsed={now-started:.0f}s speed={steps/max(now-started,1e-6):.1f} steps/s "
+                  f"completed={done}/{C} failed={failed} (checkpoint argument order)", flush=True)
+            last_progress=now
     clip_len = motion.clip_len[clip_of]
     res = []
     for m in range(M):
