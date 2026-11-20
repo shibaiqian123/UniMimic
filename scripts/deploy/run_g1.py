@@ -11,6 +11,7 @@ import g1_bridge_io as gb
 from blinkmimic.deploy.core import Bundle, STAGES
 from blinkmimic.deploy.controller import Controller
 from blinkmimic.deploy.lowstate import decode_snapshot
+from blinkmimic.deploy.snapshot import read_snapshot
 from blinkmimic.deploy.session import DEFAULT_PROFILE,new_session,atomic_json
 
 def plain(x):
@@ -67,6 +68,7 @@ def main():
     q=np.zeros(35); kp=q.copy(); kd=q.copy(); modes=bytes([1]*29+[0]*6)
     began=time.monotonic(); deadline=began; damp_since=None; last_pub=last_lc=0; excess=0
     observed=False
+    last_rx=None
     command_started=False
     try:
         # Observe other publishers for 1 second before allowing any active command.
@@ -79,13 +81,19 @@ def main():
         while bridge.alive():
             now=time.monotonic()
             bridge.read_status(status); bs=status[0]
-            got=bridge.read_snap(snap); r=snap[0]
-            if not got or not r["n_rx"]:
-                if now-began>3:
-                    raise RuntimeError("no consistent lowstate")
-                time.sleep(.01); continue
+            got=read_snapshot(bridge,snap); r=snap[0]
+            if not got:
+                # Startup wait and a transient seqlock collision are different cases.
+                elapsed=time.monotonic()
+                if not observed and elapsed-began>3:
+                    raise RuntimeError("no initial lowstate")
+                if observed and elapsed-last_rx>ctl.limits["state_age_s"]:
+                    raise RuntimeError("lowstate snapshot unavailable within freshness deadline")
+                if stop[0]:raise RuntimeError("operator exit")
+                time.sleep(.001); continue
             observed=True
             s=decode_snapshot(r)
+            last_rx=s["t_rx"]
             if a.read_only:
                 log.write(json.dumps(dict(event="state",t=now,s=s,other_lowcmd=int(bs["lc_count"])),default=plain)+"\n")
                 if stop[0] or now-began>=a.seconds: break
@@ -101,7 +109,10 @@ def main():
             if stop[0]: ctl.damp("operator exit")
             if ctl.state!="PASSIVE" and now-deadline>.04:
                 fault="control loop overrun"
+            controller_started=time.monotonic()
             out=ctl.update(s,now,fault)
+            controller_ms=(time.monotonic()-controller_started)*1000
+            policy_inference_ms=out.get("inference_ms") if out is not None else None
             if ctl.state=="DAMP" and not command_started:
                 raise RuntimeError("refused before first command: "+ctl.reason)
             if out is not None:
@@ -116,7 +127,9 @@ def main():
                 else:
                     command_started=True
                 log.write(json.dumps(dict(t=now,state=ctl.state,reason=ctl.reason,s=s,result=out,
-                                          state_age_s=age),default=plain)+"\n")
+                                          state_age_s=age,policy_inference_ms=policy_inference_ms,
+                                          controller_ms=controller_ms,
+                                          sample_age_before_control_ms=(controller_started-s["t_rx"])*1000),default=plain)+"\n")
             if a.status_file:
                 atomic_json(a.status_file,dict(t=now,state=ctl.state,frame=ctl.core.frame,phase=ctl.core.phase,
                     reason=ctl.reason,reject_reason=ctl.reject_reason,keys=s["keys"],
@@ -128,7 +141,13 @@ def main():
             time.sleep(max(0,deadline-time.monotonic()))
     except BaseException as exc:
         ctl.damp(str(exc))
-        log.write(json.dumps(dict(event="exception",reason=str(exc)))+"\n")
+        fault_time=time.monotonic()
+        log.write(json.dumps(dict(event="exception",t=fault_time,state="DAMP",
+                                 frame=ctl.core.frame,reason=str(exc)))+"\n")
+        if a.status_file:
+            atomic_json(a.status_file,dict(t=fault_time,state="DAMP",frame=ctl.core.frame,phase=ctl.core.phase,
+                reason=ctl.reason,reject_reason="",keys=0,
+                heading=ctl.core.heading.tolist() if ctl.core.heading is not None else None,log_dir=str(a.log_dir)))
         if not a.read_only and command_started and bridge.alive():
             q.fill(0); kp.fill(0); kd[:29]=3.
             until=time.monotonic()+10.
@@ -138,7 +157,7 @@ def main():
         raise
     finally:
         bridge.quit()
-        log.write(json.dumps(dict(event="end",state=ctl.state,reason=ctl.reason))+"\n")
+        log.write(json.dumps(dict(event="end",t=time.monotonic(),state=ctl.state,frame=ctl.core.frame,reason=ctl.reason))+"\n")
         log.close()
 if __name__=="__main__":
     main()

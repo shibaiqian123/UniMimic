@@ -18,12 +18,16 @@ def evaluate(session,runner_dir,bundle):
         row=json.loads(line)
         if "result" in row and "t" in row:
             records.append((float(row["t"]),row.get("state",""),int(row["result"]["frame"])))
+        elif row.get("event") in ("exception","end") and "t" in row and "state" in row:
+            records.append((float(row["t"]),row["state"],int(row.get("frame",records[-1][2] if records else 0))))
     if not records or not (session/"physics.npz").exists():return {"available":False,"passed":False}
     times=np.array([r[0] for r in records]);states=np.array([r[1] for r in records]);frames=np.array([r[2] for r in records])
     with np.load(session/"physics.npz",allow_pickle=False) as z:
         idx=np.searchsorted(times,z["t"],side="right")-1
         valid=idx>=0;idx=np.maximum(idx,0)
-        mask=valid&(states[idx]=="POLICY")
+        policy=valid&(states[idx]=="POLICY")
+        stale_policy=policy&((z["t"]-times[idx])>.04)
+        mask=policy&~stale_policy
         if not mask.any():return {"available":False,"passed":False}
         f=np.clip(frames[idx[mask]],0,bundle.T-1)
         qpos=z["qpos"][mask];pose0=json.loads((session/"plant.json").read_text())["initial_root"]
@@ -45,7 +49,7 @@ def evaluate(session,runner_dir,bundle):
             stop_info=dict(available=True,supported=supported,max_height_change_m=float(dz.max()),
                            max_tilt_r22_change=float(tilt_change.max()),
                            passed=supported and bool(dz.max()<=.25 and tilt_change.max()<=.8))
-        return dict(available=True,passed=not bool(violation.any()),samples=int(mask.sum()),
+        return dict(available=True,passed=not bool(violation.any() or stale_policy.any()),policy_status_gap_samples=int(stale_policy.sum()),samples=int(mask.sum()),
                     max_height_error_m=float(height.max()),max_tilt_r22_error=float(tilt.max()),
                     joint_tracking_rmse_rad=rmse,violation_samples=int(violation.sum()),
                     first_violation_frame=int(f[np.flatnonzero(violation)[0]]) if violation.any() else None,
