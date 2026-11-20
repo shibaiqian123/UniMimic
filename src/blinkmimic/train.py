@@ -11,6 +11,8 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 import time
 
+from blinkmimic.distributed_bootstrap import pin_rank
+DIST = pin_rank()
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 parser = argparse.ArgumentParser()
@@ -133,11 +135,17 @@ parser.add_argument("--resume", type=str, default=None)
 parser.add_argument("--amp", type=str, default="bf16", choices=["none", "bf16"], help="autocast dtype for MLP matmuls")
 parser.add_argument("--latent-mode", "--latent_mode", dest="latent_mode",
                     choices=["continuous32","continuous64","fsq64"], default="continuous32")
+parser.add_argument("--dist-audit", action="store_true", help="verify identical model/buffer/optimizer state across ranks at log intervals")
+parser.add_argument("--dist-no-graphs", action="store_true", help="explicit two-GPU eager diagnostic; not the default")
 args = parser.parse_args()
+if args.dist_no_graphs and not DIST:
+    parser.error("--dist-no-graphs requires torchrun with two GPUs")
+if args.dist_no_graphs:
+    args.cuda_graph = args.collect_graph = args.graph_early = args.reset_masked = False
 from blinkmimic.latent import validate_args, check_resume
 args.latent_spec = validate_args(vars(args))
 
-if args.tensorboard:
+if args.tensorboard and (not DIST or int(os.environ.get("RANK",0))==0):
     try:
         from torch.utils.tensorboard import SummaryWriter
     except ImportError as exc:
@@ -146,6 +154,13 @@ if args.tensorboard:
 
 import torch
 import torch.nn as nn
+
+DIST_CTX = None
+GLOBAL_ARGS = dict(vars(args))
+if DIST:
+    from blinkmimic.distributed import init, split_global
+    DIST_CTX = init()
+    GLOBAL_ARGS = split_global(args, DIST_CTX.world)
 
 from blinkmimic.buffer import ReplayBuffer
 from blinkmimic.dr import XiLayout
@@ -168,7 +183,8 @@ torch.manual_seed(args.seed)
 networks.AMP_DTYPE = torch.bfloat16 if args.amp == "bf16" else None
 dev = "cuda:0"
 os.makedirs(args.log_dir, exist_ok=True)
-json.dump(vars(args), open(os.path.join(args.log_dir, "args.json"), "w"), indent=2)
+if not DIST or DIST_CTX.main:
+    json.dump(GLOBAL_ARGS, open(os.path.join(args.log_dir, "args.json"), "w"), indent=2)
 
 robot = get_robot(args.robot)
 J = robot.num_joints
@@ -216,6 +232,16 @@ pi_avg = torch.optim.swa_utils.AveragedModel(pi, multi_avg_fn=torch.optim.swa_ut
                                              use_buffers=True) if args.pi_ema > 0 else None  # fmt: skip
 opt_v = torch.optim.Adam(critic.parameters(), **adam_kw())
 
+if DIST:
+    if pi_avg is not None: pi_avg.to(dev)  # includes n_averaged: NCCL cannot broadcast a CPU buffer
+    DIST_CTX.broadcast_models(wm, pi, critic)
+    if pi_avg is not None: DIST_CTX.broadcast_models(pi_avg)
+    torch.manual_seed(args.seed + 100003 * DIST_CTX.rank)
+    import random
+    import numpy as np
+    random.seed(args.seed + 100003 * DIST_CTX.rank)
+    np.random.seed(args.seed + 100003 * DIST_CTX.rank)
+
 start_it, wall_offset, sim_steps = 0, 0.0, 0
 
 
@@ -232,10 +258,12 @@ def load_opt_states(ck: dict):
 
 INIT_BINS = None  # --resume: reset-sampler statistics, copied into the simulator once it exists
 RESUME_CTRL = None  # --resume: the control state of last.pt, applied once the objects exist
-if args.resume:
+if args.resume and not DIST:
     # needs the full training state: last.pt. "pi" is the Polyak average with --pi_ema (what evaluation uses), so the
     # live policy comes from "pi_live" and the average from "pi_avg"
     ck = torch.load(args.resume, map_location=dev, weights_only=False)
+    if ck.get("distributed",{}).get("world_size",1)!=1:
+        raise ValueError("cannot resume distributed full checkpoint in single-GPU mode")
     assert "opt_pi" in ck, f"--resume {args.resume}: no optimizer state (use last.pt)"
     check_pruned(ck.get("args", {}), what=args.resume)
     check_resume(ck.get("args", {}), vars(args))
@@ -676,7 +704,7 @@ def collect(n_steps: int, stats: dict):
             stats["term"].append(out["term"].float().sum())
             stats["done"].append(out["done"].float().sum())
 
-if GRAPH:
+if GRAPH and not DIST:
     assert not args.reset_masked or args.collect_graph, "--reset_masked needs --collect_graph"
     if args.reset_masked:
         env.use_static_focus()
@@ -692,7 +720,7 @@ else:
     wm_update_g, policy_update_g = wm_update, policy_update
 
 
-EPROBE = args.eprobe_share > 0  # --eprobe_share; off: code path and random stream unchanged
+EPROBE = args.eprobe_share > 0 and (not DIST or DIST_CTX.main)  # --eprobe_share; off: code path and random stream unchanged
 if EPROBE:
     EP_TILE = torch.cat([torch.arange(int(motion.clip_start[c]), int(motion.clip_end[c]) - 1, args.eprobe_tile)
                          for c in range(len(motion.names))]).to(dev)  # fmt: skip
@@ -875,6 +903,11 @@ def eprobe_finish(it, lead, t0, fail_f):
     print(f"--eprobe it {it}: lead {lead} | {nf}/{P} failures {fl[:8]} | {time.time() - t0:.1f} s{lag}", flush=True)
 
 
+if DIST:
+    from blinkmimic.train_distributed import run
+    run(globals())
+    raise SystemExit(0)
+
 stats = {"r": [], "ep_len": [], "ep_ret": [], "term": [], "done": []}
 collect(args.warmup_steps, stats)  # the replay buffer is not checkpointed, so a resumed run refills it too
 log_path = os.path.join(args.log_dir, "train_log.csv")
@@ -1042,3 +1075,7 @@ if CKPT_POOL is not None:  # every background checkpoint written (a failed write
 if tb_writer is not None:
     tb_writer.close()
 log_f.close()
+
+if not DIST:
+    json.dump(dict(world_size=1,peak_allocated_GB=torch.cuda.max_memory_allocated()/2**30,
+                   gpu=torch.cuda.get_device_name()),open(os.path.join(args.log_dir,"runtime_stats.json"),"w"),indent=2)

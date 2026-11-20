@@ -196,7 +196,9 @@ class TrackingSim:
         eager reset samples only when an episode ended)."""
         m = self.motion
         soft = torch.softmax(-25.0 * self.bin_G / self.G_max, 0)
-        if gate is None:
+        if getattr(self, "distributed_sampling", False):
+            pass  # global statistics are updated before the distributed reset phase
+        elif gate is None:
             self.bin_w_avg.mul_(0.999).add_(0.001 * soft)
         else:
             self.bin_w_avg.copy_(torch.where(gate, self.bin_w_avg * 0.999 + 0.001 * soft, self.bin_w_avg))

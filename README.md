@@ -271,3 +271,5 @@ GPU playback is available via `scripts/deploy/sim2sim.py --backend warp --cmd g1
 
 ## 64D Motion tokens
 Continuous64 / FSQ64 training, split ONNX export and legacy32 compatibility: [FSQ64](docs/FSQ64.md). Existing 32D hardware bundles remain unchanged.
+
+Two-GPU fixed-global-batch training: [DUAL_GPU](docs/DUAL_GPU.md). Use --gpus 2; environment/batch counts remain global, learning rate is unchanged.
