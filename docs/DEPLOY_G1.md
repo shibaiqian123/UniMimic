@@ -178,3 +178,71 @@ HOLD 最后100条样本中位数：左肩偏差 +0.120465 rad / 力矩 +7.725176
 拒绝原因为 left_shoulder_roll_joint error=0.120rad limit=0.100rad。
 该结果支持负载导致纯PD准备姿态偏差，但仍未复现实机约10 N·m肩部力矩，
 不能宣称模型已完全标定或walk已通过。原阈值、增益及策略包未变。
+
+
+## 控制运行时延迟改造（2026-11-21）
+
+模型、PD、50Hz/500Hz频率和20ms状态新鲜度阈值不变。
+
+- ONNX初始化时预热16次，不推进控制器历史或参考帧，不发布DDS命令。
+- 日志与UI状态文件在独立进程中序列化和写盘；控制线程使用有界非阻塞队列。
+  队列满或写进程失效时计数丢失，不阻塞控制；结束时 logging_report.json 明确完整性。
+  日志不完整不计为仿真验收通过，不新增真机启动认证。
+- policy_inference_thread_cpu_ms 和 controller_thread_cpu_ms 与原墙钟耗时并列记录。
+  单线程CPU推理下，两者的差异可帮助识别调度等待，不能单凭差值认定具体系统服务。
+- final 默认 --runtime-affinity auto：根据允许CPU集合与物理核拓扑，给物理、DDS、
+  runner、日志分配CPU；viewer避开前三者的SMT兄弟核。
+  session.json 记录实际分配。--runtime-affinity none 用于无亲和性对照。
+  这是进程亲和性，不是内核CPU独占隔离，也不是硬实时保证。
+- runner 可单独指定 --cpu-affinity、--logger-cpus、--bridge-cpus，均为逗号分隔CPU号；
+  真机默认不强行修改亲和性，须按该机器实际拓扑显式选择。
+- 超时文案改为 state expired after control，并注明实际阶段和状态年龄。
+- report.json 的 physics_timing_valid 单独代表物理墙钟检查；
+  timing_valid 还要求runner没有状态过期或控制周期超时，避免此前的误导。
+
+现有final命令无需更换模型或新增参数即可使用以上默认优化。
+无窗口自动验证可用 --auto；窗口操作及遥控状态机不变。
+
+补充：控制循环及1kHz物理循环在初始化后先执行一次GC，再暂时禁用周期循环GC，
+退出时恢复；正常无环对象仍由引用计数释放。物理UI状态写入也移至独立进程。
+新增 cycle_interval_ms、cycle_thread_cpu_ms、wake_lateness_ms、previous_enqueue_ms，
+用于区分循环唤醒延迟与控制计算延迟。物理时序报告增加 lag_max_s，
+验收同时检查最大延迟与P99，避免低频尖峰被P99掩盖。
+
+可选 --rt-priority 10 仅对隔离final的runner、DDS bridge与物理进程使用SCHED_RR；
+viewer、日志进程保持普通调度。默认0，不自动提权，也不默默回退。
+当前229 RLIMIT_RTPRIO=0，未执行实时优先级验证；无权限时在创建仿真进程前报错。
+若操作员决定测试，可在自己的229终端临时授权该shell：
+
+    sudo prlimit --pid "$$" --rtprio=10:10
+
+然后在原final命令增加 --rt-priority 10。该授权随shell退出结束，不改系统服务或永久配置。
+不要用sudo运行整套Python部署程序，也不要给Python解释器设置全局capability。
+
+验证记录：
+- 31项运行时/状态机/消息回归通过。
+- runtime_fix_auto/20261121_204015_359919：约146秒播放后循环超时，未完成。
+- runtime_fix_view/20261121_204418_364177：推理最大3.42ms，物理tick停滞触发stale state。
+- runtime_fix_view_v2/20261121_204540_365899：推理最大11.86ms，控制最大12.77ms，
+  约53秒播放后循环间隔69.21ms，线程CPU仅3.49ms，wake_lateness=49.31ms；
+  日志零丢失，完整流程未通过。新记录还增加cycle_process_cpu_ms，用于后续区分进程内等待。
+以上不能证明延迟尖峰已消除，SCHED_RR仍待有权限的环境验证。未启动真实机器人。
+
+### 实际调度与睡眠诊断
+
+runner初始化后打印并记录实际SCHED策略、优先级、CPU亲和性、线程清单、
+RLIMIT_RTPRIO、timer slack和内核RT配额。以实际读取值为准，不再只看命令行请求值。
+每轮的previous_sleep记录上一轮请求睡眠时长、实际返回时间、超出时长、
+睡眠期间线程CPU时间、主动/被动上下文切换和页错误；after_sleep_ms区分
+睡眠返回后到下一轮开始的间隔。首次DAMP发送后额外记录fault_scheduling。
+这些只是证据字段，不延后DAMP、不修改状态超时门槛。
+
+内核sched_schedstats关闭时，runqueue_wait_ns为null而非0；
+此时不能根据零等待计数声称线程没有被调度延迟，也不能仅凭sleep返回晚区分
+定时器唤醒延迟与唤醒后的调度/GIL等待。需要内核事件跟踪才能进一步确认。
+
+新增scripts/deploy/timing_probe.py，仅测试睡眠唤醒，不加载模型，不连接DDS、不发电机命令。
+普通调度例子：
+    .venv/bin/python scripts/deploy/timing_probe.py --cpu 62 --seconds 60 --out deploy_logs/timing_probe_normal.json
+同一已授予RLIMIT_RTPRIO的终端可以加 --rt-priority 10 做对照；
+无权限明确报错，实际策略会打印出来。不要把单次探针正常当成整套部署验收。

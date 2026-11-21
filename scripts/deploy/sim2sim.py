@@ -177,6 +177,8 @@ def main():
     ap.add_argument("--precision",choices=["checkpoint","none","bf16"],default="checkpoint")
     ap.add_argument("--record",action="store_true",help="warp: record selected replica trajectory")
     ap.add_argument("--screenshot",action="store_true",help="warp headless: render final state to out/viewer.png (MUJOCO_GL=egl)")
+    ap.add_argument("--rt-priority",type=int,default=0,help="final only: optional SCHED_RR priority 1..10; requires OS permission, no silent fallback")
+    ap.add_argument("--runtime-affinity",choices=["auto","none"],default="auto",help="final: separate physics, DDS, control, and logging CPU resources")
     ap.add_argument("--auto",action="store_true",help="final simulation only: send the same keyboard/button events automatically")
     ap.add_argument("--duration",type=float,help="final wall-clock duration, then request stop")
     ap.add_argument("--dds-domain",type=int,choices=[1,2],default=1)

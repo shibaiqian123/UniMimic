@@ -1,4 +1,5 @@
 """Independent wall-clock CPU plant and modeled sensors. No policy/goal evaluation here."""
+import gc
 import argparse,copy,json,os,signal,socket,time
 from pathlib import Path
 import numpy as np
@@ -9,6 +10,7 @@ from .imu_model import ImuModel
 from .buttons import ButtonPulses
 from .sim_ipc import SimIPC,STATE
 from .session import atomic_json
+from .runtime_io import RuntimeLog,cpu_list
 
 def main():
     ap=argparse.ArgumentParser();ap.add_argument("--session",required=True,type=Path)
@@ -43,6 +45,8 @@ def main():
         primary_imu_site="imu",sensor_model="SuperMimic saturated gyro / integrated attitude",
         calibrated=False,gyro_limit_rad_s=imu.limit,physics_dt=.001))
     rec=[];state=np.zeros(1,STATE);row=state[0]
+    ui=RuntimeLog(a.session/"physics_events.jsonl",cpu_list(os.environ.get("BLINK_LOG_CPUS")))
+    gc_was_enabled=gc.isenabled();gc.collect();gc.disable()
     wall0=time.monotonic();tick=0;lags=[];display_lags=[];input_log=[];last_ui=0.
     cmd=ipc.command();last_read=0.;last_toggle=-1.
     try:
@@ -109,7 +113,7 @@ def main():
                     support=support,keys=int(row["keys"]),command_seq=int(cmd["seq"])))
                 display_lags.append(lag)
             if wall-last_ui>.1:
-                atomic_json(a.session/"physics_status.json",dict(t=wall,sim_time=float(p.d.time),lag_s=lag,
+                ui.status(a.session/"physics_status.json",dict(t=wall,sim_time=float(p.d.time),lag_s=lag,
                     support=support,keys=int(row["keys"]),key_label=adapter.label,temperature=temperature,drop_state=drop,
                     command_seq=int(cmd["seq"])))
                 last_ui=wall
@@ -118,11 +122,13 @@ def main():
             if remaining>0:time.sleep(remaining)
     finally:
         sock.close();ipc.close()
+        ui.close()
+        if gc_was_enabled:gc.enable()
         if rec:np.savez_compressed(a.session/"physics.npz",**{k:np.array([x[k] for x in rec]) for k in rec[0]})
         (a.session/"input.json").write_text(json.dumps(input_log,indent=2))
         lag99=float(np.percentile(np.abs(lags),99)) if lags else None
         atomic_json(a.session/"physics_report.json",dict(steps=tick,sim_seconds=float(p.d.time),
-            wall_seconds=time.monotonic()-wall0,lag_p99_s=lag99,end_lag_s=lags[-1] if lags else None,
-            timing_valid=bool(lags and lag99<=.02 and abs(lags[-1])<=.02),imu=imu.summary(),
+            wall_seconds=time.monotonic()-wall0,lag_p99_s=lag99,lag_max_s=max(map(abs,lags)) if lags else None,end_lag_s=lags[-1] if lags else None,
+            timing_valid=bool(lags and lag99<=.02 and max(map(abs,lags))<=.02 and abs(lags[-1])<=.02),imu=imu.summary(),
             sensor_calibrated=False,temperature_model="synthetic input, not a calibrated thermal model"))
 if __name__=="__main__":main()

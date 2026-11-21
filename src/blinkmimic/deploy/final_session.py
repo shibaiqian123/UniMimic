@@ -1,6 +1,7 @@
 """Final CPU sim2sim supervisor. Uses the SAME hardware runner over isolated DDS."""
 import json,os,signal,socket,subprocess,sys,time
 from pathlib import Path
+from .runtime_io import affinity_plan
 from .core import Bundle
 from .session import new_session,atomic_json,DEFAULT_PROFILE
 from .sim_ipc import SimIPC,BRIDGE
@@ -20,20 +21,30 @@ def stop_process(p,timeout=3):
 def run(a):
     if a.backend!="cpu":raise ValueError("--cmd final uses CPU official-model physics; GPU is diagnostic")
     if not a.unitree_xml:raise ValueError("--unitree-xml is required")
+    priority=getattr(a,"rt_priority",0)
+    if not 0<=priority<=10:raise ValueError("--rt-priority must be 0..10")
+    if priority:
+        check=subprocess.run(["chrt","-r",str(priority),"true"],capture_output=True,text=True)
+        if check.returncode:raise RuntimeError("SCHED_RR permission unavailable; grant this shell RLIMIT_RTPRIO first: "+check.stderr.strip())
+    plan=affinity_plan() if getattr(a,"runtime_affinity","auto")=="auto" else {}
     b=Bundle(a.bundle)
     session=new_session(a.out.resolve())
     meta=dict(kind="blink_final_sim",domain=a.dds_domain,iface="lo",bundle=str(a.bundle.resolve()),
               bundle_fingerprint=b.fingerprint,unitree_xml=str(a.unitree_xml.resolve()),
-              stage=a.stage,sensor_profile=DEFAULT_PROFILE,physics_hz=1000,lowstate_hz=1000,
+              rt_priority=priority,runtime_affinity=plan,stage=a.stage,sensor_profile=DEFAULT_PROFILE,physics_hz=1000,lowstate_hz=1000,
               lowcmd_hz=500,policy_hz=50,auto=a.auto)
     atomic_json(session/"session.json",meta)
     ipc=SimIPC(session/"sim.mmap",create=True)
     print(f"FINAL SIM SESSION: {session}",flush=True)
     print(f"Keyboard: {sys.executable} scripts/deploy/sim_keyboard.py --session {session}",flush=True)
     env=dict(os.environ,PYTHONPATH=str(ROOT/"src"),OMP_NUM_THREADS="1")
+    env.update(OPENBLAS_NUM_THREADS="1",MKL_NUM_THREADS="1")
+    if plan:env.update(BLINK_LOG_CPUS=",".join(map(str,plan["logger"])),BLINK_BRIDGE_CPUS=",".join(map(str,plan["sim_bridge"])))
     children=[];files=[]
     def spawn(name,cmd):
         f=open(session/(name+".log"),"w");files.append(f)
+        if plan and name in plan:cmd=["taskset","-c",",".join(map(str,plan[name]))]+cmd
+        if priority and name in ("physics","sim_bridge","runner"):cmd=["chrt","-r",str(priority)]+cmd
         p=subprocess.Popen(cmd,cwd=ROOT,env=env,stdout=f,stderr=subprocess.STDOUT)
         children.append(p);return p
     terminate=[False]
@@ -139,6 +150,28 @@ def run(a):
     from .final_evaluate import evaluate
     tracking=evaluate(session,rs["log_dir"],b) if rs.get("log_dir") else {"available":False,"passed":False}
     report["tracking"]=tracking
+    runtime={}
+    if rs.get("log_dir"):
+        records=[]
+        with open(Path(rs["log_dir"])/"runner.jsonl") as f:
+            for line in f:
+                try:records.append(json.loads(line))
+                except ValueError:pass
+        for field in ("controller_ms","controller_thread_cpu_ms","policy_inference_ms","policy_inference_thread_cpu_ms"):
+            vals=[r[field] for r in records if isinstance(r.get(field),(int,float))]
+            runtime["max_"+field]=max(vals) if vals else None
+        limits=b.cfg.get("runner_limits",{})
+        threshold=limits.get("state_age_s",.02)
+        runtime["state_age_overruns"]=sum(r.get("state_age_s",0)>threshold for r in records if r.get("state")!="DAMP")
+        runtime["control_deadline_exceeded"]=any(r.get("controller_ms",0)>20 for r in records)
+        runtime["timing_fault"]=any(any(word in r.get("reason","") for word in
+            ("state expired","stale state","control loop overrun","snapshot unavailable")) for r in records)
+        runtime["logging"]=read(Path(rs["log_dir"])/"logging_report.json")
+    report["runtime"]=runtime
+    report["physics_timing_valid"]=bool(pr.get("timing_valid"))
+    report["timing_valid"]=bool(report["physics_timing_valid"] and not runtime.get("timing_fault",True)
+                                and not runtime.get("control_deadline_exceeded",True))
+    report["passed"]=bool(report["passed"] and report["timing_valid"] and runtime.get("logging",{}).get("complete",False))
     report["passed"]=bool(report["passed"] and tracking.get("passed") and not tracking.get("policy_support_samples",0) and tracking.get("stop_stage",{}).get("passed",False))
     if counts[2] or counts[3]:report["passed"]=False
     atomic_json(session/"report.json",report)

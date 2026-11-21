@@ -108,6 +108,9 @@ class OnnxPolicy:
         if self.proprio93:expected["orientation6d_future"]=[10,6]
         if set(ins)!=set(expected) or any(ins[k][1:]!=shape for k,shape in expected.items()):
             raise ValueError("invalid ONNX inputs")
+        # Warm caches/allocators before DDS command publication, without advancing controller state.
+        feed={name:np.zeros([1]+shape,dtype=np.float32) for name,shape in expected.items()}
+        for _ in range(16):self.session.run(["actions"],feed)
     def __call__(self, history, goal, orientation6d_future=None):
         feed={"obs_history":history[None].astype(np.float32),"goal":goal[None].astype(np.float32)}
         if self.proprio93:
@@ -170,14 +173,16 @@ class DeployCore:
     def step(self, q, dq, gyro, R):
         f,g = self.reference()
         hist = self.observe(np.asarray(q),np.asarray(dq),np.asarray(gyro),R)
+        cpu_t = time.thread_time()
         t = time.perf_counter()
         a = np.asarray(self.policy(hist,g,self.orientation6d_future) if self.b.cfg.get("obs_dim",99)==93
                        else self.policy(hist,g),float)
         ms = (time.perf_counter()-t)*1000
+        cpu_ms = (time.thread_time()-cpu_t)*1000
         if a.shape != (29,) or not np.isfinite(a).all():
             raise ValueError("invalid policy action")
         self.last_action = a.copy()
-        result = dict(action=a, target=self.b.q0+self.b.scale*a, frame=f, phase=self.phase, inference_ms=ms)
+        result = dict(action=a, target=self.b.q0+self.b.scale*a, frame=f, phase=self.phase, inference_ms=ms, inference_thread_cpu_ms=cpu_ms)
         if self.phase == "motion":
             if self.frame >= self.b.T-2:
                 self.frame = self.b.T-1
