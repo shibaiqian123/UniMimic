@@ -6,6 +6,7 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--out",type=Path,required=True)
     ap.add_argument("--latent-mode",default="fsq64",choices=["continuous32","continuous64","fsq64"])
+    ap.add_argument("--observation-mode",choices=["legacy99","proprio93"],default="legacy99")
     ap.add_argument("--motion-dir",type=Path,default=Path("data/lafan1_g1"))
     ap.add_argument("--warmup-iterations",type=int,default=50)
     ap.add_argument("--measure-iterations",type=int,default=200)
@@ -19,7 +20,7 @@ def main():
     commands=[];total=a.warmup_iterations+a.measure_iterations
     for n in (1,2):
         out=a.out/f"gpu{n}"
-        cmd=[sys.executable,"scripts/train_latent.py","--gpus",str(n),"--latent-mode",a.latent_mode,
+        cmd=[sys.executable,"scripts/train_latent.py","--gpus",str(n),"--latent-mode",a.latent_mode,"--observation-mode",a.observation_mode,
              "--motion-dir",str(a.motion_dir),"--log-dir",str(out),"--seed","0",
              "--num_envs",str(a.num_envs),"--iterations",str(total),"--log_every","50",
              "--ckpt_every",str(total),"--ckpt_minutes","0"]

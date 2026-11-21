@@ -12,6 +12,7 @@ JOINTS += [side + "_" + part + "_joint" for side in ("left", "right")
            for part in ("shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow",
                         "wrist_roll", "wrist_pitch", "wrist_yaw")]
 OBS_LAYOUT = "q-q0,dq,gyro_pelvis,gravity_pelvis,last_raw_action,reference_rotation6d_rowmajor"
+PROPRIO_LAYOUT = "q-q0,dq,gyro_pelvis,gravity_pelvis,last_raw_action"
 STAGES = {
     "air": dict(max_tilt=0.35, velocity_fraction=0.3, torque_fraction=0.5, max_action=10.0),
     "feet": dict(max_tilt=0.35, velocity_fraction=0.3, torque_fraction=0.5, max_action=10.0),
@@ -49,15 +50,20 @@ class Bundle:
         self.path = Path(path)
         self.cfg = json.loads((self.path / "deploy_config.json").read_text())
         c = self.cfg
-        if c["schema"] not in ("blinkmimic_single_motion_v1","blinkmimic_single_motion_v2") or c["joint_names"] != JOINTS:
+        if c["schema"] not in ("blinkmimic_single_motion_v1","blinkmimic_single_motion_v2","blinkmimic_single_motion_v3") or c["joint_names"] != JOINTS:
             raise ValueError("unsupported schema / motor order")
-        v2=c["schema"]=="blinkmimic_single_motion_v2"
+        v3=c["schema"]=="blinkmimic_single_motion_v3"
+        v2=c["schema"] in ("blinkmimic_single_motion_v2","blinkmimic_single_motion_v3")
+        if v3:
+            from blinkmimic.observation_contract import contract
+            if c.get("observation_spec")!=contract("proprio93"):
+                raise ValueError("unsupported future orientation contract")
         if v2:
             from blinkmimic.latent_contract import validate_v2
             validate_v2(c)
-        if (c["history"], c["goal_frames"], c["obs_dim"], c["goal_dim"], c["latent_dim"]) != (10,10,99,730,64 if v2 else 32):
+        if (c["history"], c["goal_frames"], c["obs_dim"], c["goal_dim"], c["latent_dim"]) != (10,10,93 if v3 else 99,730,64 if v2 else 32):
             raise ValueError("unsupported model dimensions")
-        if c["control_dt"] != 0.02 or c["obs_layout"] != OBS_LAYOUT:
+        if c["control_dt"] != 0.02 or c["obs_layout"] != (PROPRIO_LAYOUT if v3 else OBS_LAYOUT):
             raise ValueError("unsupported observation / timing contract")
         gain=c.get("preparation_gain_scale",1.0)
         if not np.isfinite(gain) or gain<=0:
@@ -97,11 +103,24 @@ class OnnxPolicy:
         outs={o.name:o.shape for o in self.session.get_outputs()}
         if outs.get("actions",[None,None])[1:] != [29]:
             raise ValueError("invalid ONNX action output")
-        if set(ins) != {"obs_history","goal"} or ins["obs_history"][1:] != [10,99] or ins["goal"][1:] != [730]:
+        self.proprio93=bundle.cfg["obs_dim"]==93
+        expected={"obs_history":[10,bundle.cfg["obs_dim"]],"goal":[730]}
+        if self.proprio93:expected["orientation6d_future"]=[10,6]
+        if set(ins)!=set(expected) or any(ins[k][1:]!=shape for k,shape in expected.items()):
             raise ValueError("invalid ONNX inputs")
-    def __call__(self, history, goal):
-        return self.session.run(["actions"], {"obs_history":history[None].astype(np.float32),
-                                             "goal":goal[None].astype(np.float32)})[0][0]
+    def __call__(self, history, goal, orientation6d_future=None):
+        feed={"obs_history":history[None].astype(np.float32),"goal":goal[None].astype(np.float32)}
+        if self.proprio93:
+            if orientation6d_future is None or np.shape(orientation6d_future)!=(10,6):
+                raise ValueError("explicit future orientation required")
+            feed["orientation6d_future"]=np.asarray(orientation6d_future,dtype=np.float32)[None]
+        return self.session.run(["actions"],feed)[0][0]
+
+def reference_orientation_window(root_R,frame,robot_R,heading,phase,K=10):
+    if phase not in ("pre","motion","post"):raise ValueError("unknown reference phase")
+    ids=np.minimum(frame+np.arange(1,K+1),len(root_R)-1) if phase=="motion" else np.full(K,frame,dtype=int)
+    relative=robot_R.T @ heading @ root_R[ids]
+    return relative[...,:2].reshape(K,6)
 
 class DeployCore:
     def __init__(self, bundle, policy=None):
@@ -112,6 +131,8 @@ class DeployCore:
         self.history = None
         self.last_action = np.zeros(29)
         self.heading = None
+        self.orientation6d = None
+        self.orientation6d_future = None
 
     def align(self, R_robot):
         if self.heading is not None:
@@ -135,8 +156,13 @@ class DeployCore:
             raise ValueError("call align first")
         f, _ = self.reference()
         rel = R.T @ self.heading @ self.b.motion["root_R"][f]
-        o = np.concatenate((q-self.b.q0,dq,gyro,-R[2],self.last_action,rel[:,:2].reshape(6)))
-        if o.shape != (99,) or not np.isfinite(o).all():
+        self.orientation6d=rel[:,:2].reshape(6).copy()
+        base=(q-self.b.q0,dq,gyro,-R[2],self.last_action)
+        if self.b.cfg.get("obs_dim",99)==93:
+            self.orientation6d_future=reference_orientation_window(self.b.motion["root_R"],f,R,self.heading,self.phase)
+            o=np.concatenate(base)
+        else:o=np.concatenate((*base,self.orientation6d))
+        if o.shape != (self.b.cfg.get("obs_dim",99),) or not np.isfinite(o).all():
             raise ValueError("invalid observation")
         self.history = np.repeat(o[None],10,axis=0) if self.history is None else np.concatenate((self.history[1:],o[None]))
         return self.history
@@ -145,7 +171,8 @@ class DeployCore:
         f,g = self.reference()
         hist = self.observe(np.asarray(q),np.asarray(dq),np.asarray(gyro),R)
         t = time.perf_counter()
-        a = np.asarray(self.policy(hist,g),float)
+        a = np.asarray(self.policy(hist,g,self.orientation6d_future) if self.b.cfg.get("obs_dim",99)==93
+                       else self.policy(hist,g),float)
         ms = (time.perf_counter()-t)*1000
         if a.shape != (29,) or not np.isfinite(a).all():
             raise ValueError("invalid policy action")

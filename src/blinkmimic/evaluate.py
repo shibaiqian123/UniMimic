@@ -39,6 +39,7 @@ import dataclasses
 import re
 
 import numpy as np
+from blinkmimic.policy_inputs import policy_action, update_norms, normalizer_inputs, environment_orientation
 import torch
 
 import blinkmimic.networks as networks
@@ -112,7 +113,7 @@ def evaluate(env: TrackingSim, ck: dict, record: str | None = None) -> dict:
         S = env.state()
         o = env.observe()
         hist = o.unsqueeze(1).repeat(1, Hh, 1) if hist is None else torch.cat((hist[:, 1:], o.unsqueeze(1)), 1)
-        a = pi(hist, motion.goal(env.f, K))
+        a = policy_action(pi,hist,motion.goal(env.f,K),environment_orientation(pi,env,motion,K))
         alive = ~env.done_eval.clone()
         if record:
             from blinkmimic.rotations import mat_to_quat

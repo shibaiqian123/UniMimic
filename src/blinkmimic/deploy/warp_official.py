@@ -172,7 +172,9 @@ class TorchCudaPolicy:
         self.net=Policy(99,730,29,hist=10,enc_hidden=widths("enc_hidden"),dec_hidden=widths("dec_hidden"),
                         **policy_kwargs(c,get_robot("g1"))).to(self.device).eval()
         self.net.load_state_dict(ck["pi"],strict=True)
-    def __call__(self,h,g):
+    def __call__(self,h,g,orientation6d_future=None):
         with self.torch.no_grad():
             return self.net(self.torch.as_tensor(h[None],dtype=self.torch.float32,device=self.device),
-                            self.torch.as_tensor(g[None],dtype=self.torch.float32,device=self.device))[0].cpu().numpy()
+                            self.torch.as_tensor(g[None],dtype=self.torch.float32,device=self.device),
+                            orientation6d_future=None if orientation6d_future is None else self.torch.as_tensor(
+                                orientation6d_future[None],dtype=self.torch.float32,device=self.device))[0].cpu().numpy()

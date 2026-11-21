@@ -1,4 +1,5 @@
 """Local computation phases for global-batch distributed training."""
+from blinkmimic.policy_inputs import policy_action, update_norms, normalizer_inputs, environment_orientation
 import torch
 from .distributed import LocalGraph, zero_grads, optimizer_step, update_bins
 from .mdp import unflatten_state, MAX_STEP_REWARD
@@ -14,6 +15,7 @@ class Collector:
         self.f,self.ep,self.prev=self.env.f,self.env.ep_step,self.env.a_prev
         self.hist=g["obs_hist"]
         self.goal=torch.zeros(self.a.num_envs,g["GOAL_DIM"],device=g["dev"])
+        self.orientation=torch.zeros(self.a.num_envs,10,6,device=g["dev"]) if self.pi.observation_mode=="proprio93" else None
         self.done=torch.zeros(self.a.num_envs,dtype=torch.bool,device=g["dev"])
         self.buffer.use_device_ptr(device_size=True)
         self.observe=LocalGraph(self._observe,ctx,self.a.collect_graph)
@@ -27,11 +29,12 @@ class Collector:
                       torch.cat((self.hist[:,1:],o[:,None]),1))
         self.hist.copy_(h)
         self.goal.copy_(self.motion.goal(self.env.f,self.a.goal_frames))
+        if self.orientation is not None:self.orientation.copy_(environment_orientation(self.pi,self.env,self.motion,self.a.goal_frames))
         return o
 
     @torch.no_grad()
     def _physics(self):
-        a=self.pi(self.hist,self.goal)
+        a=policy_action(self.pi,self.hist,self.goal,self.orientation)
         a=(a+self.a.action_noise*torch.randn_like(a)).clamp(-20,20)
         out=self.env.step_core(a)
         self.buffer.add_device(out)
@@ -60,7 +63,7 @@ class Collector:
     @torch.no_grad()
     def step(self):
         o=self.observe()
-        self.ctx.moments([self.pi.obs_norm,self.pi.goal_norm],[o,self.goal])
+        self.ctx.moments([self.pi.obs_norm,self.pi.goal_norm],normalizer_inputs(self.pi,o,self.goal,self.orientation))
         wmdata,totals,stats,done=self.physics()
         self.buffer.advance_host()
         self.ctx.moments([self.wm.in_norm,self.wm.out_norm,self.wm.inc_norm],wmdata)

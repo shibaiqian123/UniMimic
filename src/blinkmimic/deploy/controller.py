@@ -112,7 +112,9 @@ class Controller:
             result.update(target=target,kp=kp,kd=kd,n_clamped=n,tilt=tilt,state=self.state,reject_reason=self.reject_reason)
             if self.core.history is not None:
                 result["observation"]=self.core.history[-1].copy()
-                result["orientation6d"]=self.core.history[-1,-6:].copy()
+                result["orientation6d"]=self.core.orientation6d.copy()
+                if self.core.orientation6d_future is not None:
+                    result["orientation6d_future"]=self.core.orientation6d_future.copy()
             return result
         except Exception as exc:
             self.damp(exc)

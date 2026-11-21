@@ -137,6 +137,7 @@ parser.add_argument("--latent-mode", "--latent_mode", dest="latent_mode",
                     choices=["continuous32","continuous64","fsq64"], default="continuous32")
 parser.add_argument("--dist-audit", action="store_true", help="verify identical model/buffer/optimizer state across ranks at log intervals")
 parser.add_argument("--dist-no-graphs", action="store_true", help="explicit two-GPU eager diagnostic; not the default")
+parser.add_argument("--observation-mode",choices=["legacy99","proprio93"],default="legacy99")
 args = parser.parse_args()
 if args.dist_no_graphs and not DIST:
     parser.error("--dist-no-graphs requires torchrun with two GPUs")
@@ -144,6 +145,8 @@ if args.dist_no_graphs:
     args.cuda_graph = args.collect_graph = args.graph_early = args.reset_masked = False
 from blinkmimic.latent import validate_args, check_resume
 args.latent_spec = validate_args(vars(args))
+from blinkmimic.policy_inputs import validate_args as validate_observation
+args.observation_spec=validate_observation(vars(args))
 
 if args.tensorboard and (not DIST or int(os.environ.get("RANK",0))==0):
     try:
@@ -152,6 +155,7 @@ if args.tensorboard and (not DIST or int(os.environ.get("RANK",0))==0):
         parser.error(f"--tensorboard requires tensorboard in the training environment: {exc}")
 
 
+from blinkmimic.policy_inputs import policy_action, update_norms, normalizer_inputs, orientation_for, environment_orientation, diagnostic_orientation
 import torch
 import torch.nn as nn
 
@@ -316,7 +320,7 @@ def _wm_err(S_hat, s1, mask):
 
 
 def _imag_step(S, o_hist, a_prev, f, xi, xi_n, g):
-    a = pi(o_hist, g)
+    a = policy_action(pi,o_hist,g,orientation_for(pi,motion,f,S[1],K))
     S1 = wm.step(S, a, a_prev, xi_n)
     f1 = f + 1
     o1 = mdp.add_noise(mdp.obs(S1, a, xi, f1))
@@ -326,7 +330,7 @@ def _imag_step(S, o_hist, a_prev, f, xi, xi_n, g):
 
 def _imag_step_sensed(S, o_hist, a_prev, f, xi, xi_n, g, st):
     """Imagination step with the robot's stateful signal chain (filters, delay) at the control rate."""
-    a = pi(o_hist, g)
+    a = policy_action(pi,o_hist,g,orientation_for(pi,motion,f,S[1],K))
     S1 = wm.step(S, a, a_prev, xi_n)
     f1 = f + 1
     gyro, accel = pipe.imu_from_states(S, S1, CONTROL_DT) if robot.sensing.imu is not None else (None, None)
@@ -594,9 +598,9 @@ def _collect_core():
     oh = CG["obs_hist"]
     oh_new = torch.where(fresh[:, None, None], o.unsqueeze(1).expand_as(oh), torch.cat((oh[:, 1:], o.unsqueeze(1)), 1))
     g = motion.goal(env.f, K)
-    pi.obs_norm.update(o)
-    pi.goal_norm.update(g)
-    a = pi(oh_new, g)
+    ori=environment_orientation(pi,env,motion,K)
+    update_norms(pi,o,g,ori)
+    a = policy_action(pi,oh_new,g,ori)
     a = torch.clamp(a + args.action_noise * torch.randn_like(a), -20, 20)
     out = env.step_core(a)
     buffer.add_device(out)
@@ -685,9 +689,9 @@ def collect(n_steps: int, stats: dict):
         fresh = env.ep_step == 0
         obs_hist = torch.where(fresh[:, None, None], o.unsqueeze(1).expand_as(obs_hist), torch.cat((obs_hist[:, 1:], o.unsqueeze(1)), 1))
         g = motion.goal(env.f, K)
-        pi.obs_norm.update(o)
-        pi.goal_norm.update(g)
-        a = pi(obs_hist, g)
+        ori=environment_orientation(pi,env,motion,K)
+        update_norms(pi,o,g,ori)
+        a = policy_action(pi,obs_hist,g,ori)
         a = torch.clamp(a + args.action_noise * torch.randn_like(a), -20, 20)
         out = env.step(a)
         buffer.add(out)
@@ -745,7 +749,7 @@ def eprobe_sweep_eager(n_steps, stop, fcap):
     for _ in range(n_steps):
         o = penv.observe()
         hist = o.unsqueeze(1).repeat(1, Hh, 1) if hist is None else torch.cat((hist[:, 1:], o.unsqueeze(1)), 1)
-        a = pi_avg.module(hist, motion.goal(penv.f, K))
+        a = policy_action(pi_avg.module,hist,motion.goal(penv.f,K),environment_orientation(pi_avg.module,penv,motion,K))
         alive = ~penv.done_eval.clone()
         f_now = penv.f.clone()
         out = penv.step(a)
@@ -763,7 +767,7 @@ EPG = {}  # --eprobe_graph: static tensors and the graph
 def _eprobe_step():
     o = penv.observe()
     h = torch.cat((EPG["hist"][:, 1:], o.unsqueeze(1)), 1)
-    a = EP_PI(h, motion.goal(penv.f, K))
+    a = policy_action(EP_PI,h,motion.goal(penv.f,K),environment_orientation(EP_PI,penv,motion,K))
     alive = ~penv.done_eval.clone()
     f_now = penv.f.clone()
     out = penv.step(a)
@@ -1012,8 +1016,9 @@ for it in range(start_it, args.iterations):
         if args.latent_mode != "continuous32":
             from blinkmimic.latent import statistics
             with torch.no_grad():
-                fsq_goal = motion.goal(torch.linspace(0, motion.num_frames-1, min(256, motion.num_frames), device=dev).long(), K)
-                latent_stats = statistics(pi, fsq_goal)
+                fsq_frames = torch.linspace(0, motion.num_frames-1, min(256, motion.num_frames), device=dev).long()
+                fsq_goal = motion.goal(fsq_frames,K)
+                latent_stats = statistics(pi,fsq_goal,diagnostic_orientation(pi,motion,fsq_frames))
             with open(os.path.join(args.log_dir, "latent_metrics.jsonl"), "a") as latent_log:
                 latent_log.write(json.dumps(dict(iteration=it+1, mode=args.latent_mode, **latent_stats))+"\n")
             if tb_writer is not None:

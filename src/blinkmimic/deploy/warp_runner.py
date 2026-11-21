@@ -5,6 +5,7 @@ from pathlib import Path
 import queue
 import time
 import numpy as np
+from blinkmimic.policy_inputs import policy_action, update_norms, normalizer_inputs, environment_orientation
 import torch
 from .core import Bundle,digest
 
@@ -65,7 +66,7 @@ class WarpRunner:
         before=self.env.f.clone()
         o=self.env.observe()
         self.history=o[:,None].repeat(1,10,1) if self.history is None else torch.cat((self.history[:,1:],o[:,None]),1)
-        a=self.pi(self.history,self.motion.goal(self.env.f,10))
+        a=policy_action(self.pi,self.history,self.motion.goal(self.env.f,10),environment_orientation(self.pi,self.env,self.motion,10))
         out=self.env.step(a)
         self.returns+=torch.where(alive,out["r"],0.)
         self.steps+=alive.long()

@@ -33,6 +33,15 @@ def worker(rank,path):
             ctx.moments([norm],[local*scale]);refnorm.update(x*scale)
             for key in ("mean","var","count"):
                 torch.testing.assert_close(getattr(norm,key),getattr(refnorm,key),atol=1e-6,rtol=1e-5)
+        norms=[RunningNorm(93),RunningNorm(790)]
+        refs=[RunningNorm(93),RunningNorm(790)]
+        data=[torch.arange(6*d,dtype=torch.float32).reshape(6,d)/100 for d in (93,790)]
+        slices=[x[:2] if rank==0 else x[2:] for x in data]
+        ctx.moments(norms,slices)
+        for norm,ref,values in zip(norms,refs,data):
+            ref.update(values)
+            for key in ("mean","var","count"):
+                torch.testing.assert_close(getattr(norm,key),getattr(ref,key),atol=1e-4,rtol=1e-5)
         before=copy.deepcopy(model.state_dict());osd=copy.deepcopy(opt.state_dict())
         for p in model.parameters():p.grad=torch.ones_like(p)
         if rank==1:next(model.parameters()).grad.fill_(float("nan"))

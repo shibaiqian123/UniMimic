@@ -32,8 +32,8 @@ def main():
     widths=lambda k: tuple(map(int,cfg.get(k,"2048,1024,512,256").split(",")))
     pi=Policy(99,730,29,enc_hidden=widths("enc_hidden"),dec_hidden=widths("dec_hidden"),**policy_kwargs(cfg,robot)).eval()
     pi.load_state_dict(ck["pi"]); networks.AMP_DTYPE=None
-    def torch_policy(h,g):
-        with torch.no_grad(): return pi(torch.tensor(h[None],dtype=torch.float32),torch.tensor(g[None],dtype=torch.float32))[0].numpy()
+    def torch_policy(h,g,orientation6d_future=None):
+        with torch.no_grad(): return pi(torch.tensor(h[None],dtype=torch.float32),torch.tensor(g[None],dtype=torch.float32),orientation6d_future=None if orientation6d_future is None else torch.tensor(orientation6d_future[None],dtype=torch.float32))[0].numpy()
     results={}
     for name,policy in (("onnx",None),("torch",torch_policy)):
         sim=CpuSim(b); core=DeployCore(b,policy); core.align(sim.state()[3])

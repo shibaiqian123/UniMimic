@@ -29,6 +29,7 @@ parser.add_argument("--robot", type=str, default="g1")
 parser.add_argument("--out", type=str, default="results/metrics")
 args = parser.parse_args()
 
+from blinkmimic.policy_inputs import policy_action, update_norms, normalizer_inputs, orientation_for
 import torch
 
 import blinkmimic.networks as networks
@@ -84,9 +85,10 @@ def run(cks):
         o = env.observe()
         hist = o.unsqueeze(1).repeat(1, Hh, 1) if hist is None else torch.cat((hist[:, 1:], o.unsqueeze(1)), 1)
         g = motion.goal(env.f, K)
+        robot_R=env.state()[1] if any(p.observation_mode=="proprio93" for p in pis) else None
         for m, pi in enumerate(pis):
             sl = slice(m * C, (m + 1) * C)
-            a[sl] = pi(hist[sl], g[sl])
+            a[sl] = policy_action(pi,hist[sl],g[sl],orientation_for(pi,motion,env.f[sl],robot_R[sl] if robot_R is not None else None,K))
         alive = (~env.done_eval).float()
         if previous is not None:
             acc["action_delta"] += alive * (a-previous).square().mean(-1)

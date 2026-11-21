@@ -13,6 +13,7 @@ ROOT=Path(__file__).resolve().parents[1]
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--latent-mode",required=True,choices=["continuous32","continuous64","fsq64"])
+    ap.add_argument("--observation-mode",choices=["legacy99","proprio93"],default="legacy99")
     ap.add_argument("--gpus",type=int,choices=[1,2],default=1)
     ap.add_argument("--log-dir",required=True,type=Path)
     ap.add_argument("--motion-dir",type=Path,default=ROOT/"data/lafan1_g1")
@@ -32,10 +33,10 @@ def main():
     prefix=([sys.executable,"-u","-m","blinkmimic.train"] if a.gpus==1 else
             [sys.executable,"-u","-m","torch.distributed.run","--standalone","--nnodes=1","--nproc-per-node=2","-m","blinkmimic.train"])
     cmd=[*prefix,*flags,
-         "--latent-mode",a.latent_mode,"--motion_dir",str(a.motion_dir.resolve()),
+         "--latent-mode",a.latent_mode,"--observation-mode",a.observation_mode,"--motion_dir",str(a.motion_dir.resolve()),
          "--log_dir",str(a.log_dir.resolve()),"--seed",str(a.seed),*extra]
     if a.resume:cmd+=["--resume",str(a.resume.resolve())]
-    manifest=dict(protocol="lafan40_matched_v1",mode=a.latent_mode,seed=a.seed,gpus=a.gpus,
+    manifest=dict(protocol="lafan40_matched_v1",mode=a.latent_mode,observation_mode=a.observation_mode,seed=a.seed,gpus=a.gpus,
                   split="all 40 training clips; evaluation on the same clips is in-distribution",
                   files=files,command=cmd)
     print(shlex.join(cmd),flush=True)
@@ -44,7 +45,7 @@ def main():
     dest=a.log_dir/"experiment.json"
     if dest.exists():
         old=json.loads(dest.read_text())
-        if not a.resume or old.get("gpus",1)!=a.gpus or any(old[k]!=manifest[k] for k in ("protocol","mode","seed","files")):
+        if not a.resume or old.get("gpus",1)!=a.gpus or old.get("observation_mode","legacy99")!=a.observation_mode or any(old[k]!=manifest[k] for k in ("protocol","mode","seed","files")):
             ap.error("existing experiment requires matching resume; use a new output directory")
     elif (a.log_dir/"last.pt").exists():
         ap.error("existing checkpoint without experiment manifest; use a new output directory")

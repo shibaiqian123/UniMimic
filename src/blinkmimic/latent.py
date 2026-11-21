@@ -45,12 +45,15 @@ def validate_args(args):
     return expected
 
 def check_resume(saved, current):
+    from .policy_inputs import validate_args as validate_observation
+    if validate_observation(saved)!=validate_observation(current):
+        raise ValueError("resume observation architecture mismatch; start a separate run")
     if validate_args(saved) != validate_args(current):
         raise ValueError("resume latent architecture mismatch; start a separate run")
 
 @torch.no_grad()
-def statistics(policy, goal):
-    raw = policy.enc_raw(goal)
+def statistics(policy, goal, orientation6d_future=None):
+    raw = policy.enc_raw(goal,orientation6d_future)
     u = bound(raw)
     z = u / HALF
     q = quantize_bounded(u)
@@ -58,7 +61,9 @@ def statistics(policy, goal):
     counts = torch.stack([(ids == k).sum(0) for k in range(LEVELS)], -1)
     saturation = ((ids == 0) | (ids == LEVELS-1)).float().mean(0)
     grads = [p.grad.float().square().sum() for p in policy.enc.parameters() if p.grad is not None]
-    return dict(quantization_mse=float((q-z).square().mean()),
+    return dict(observation_mode=getattr(policy,"observation_mode","legacy99"),
+                orientation_condition="current_reference_aligned" if getattr(policy,"observation_mode","legacy99")=="proprio93" else "reference_only",
+                quantization_mse=float((q-z).square().mean()),
                 used_levels=counts.gt(0).sum(-1).cpu().tolist(),
                 utilization=(counts.gt(0).float().mean(-1)).cpu().tolist(),
                 saturation=saturation.cpu().tolist(),

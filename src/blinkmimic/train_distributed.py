@@ -212,7 +212,9 @@ def latent_log(g,ctx,tb,root,it):
     motion,pi=g["motion"],g["pi"]
     ids=torch.linspace(0,motion.num_frames-1,min(256,motion.num_frames),device=g["dev"]).long()
     ids=ids[ctx.rank::ctx.world]
-    u=bound(pi.enc_raw(motion.goal(ids,g["K"])));z=quantize_bounded(u)
+    from .policy_inputs import diagnostic_orientation
+    goals=motion.goal(ids,g["K"])
+    u=bound(pi.enc_raw(goals,diagnostic_orientation(pi,motion,ids)));z=quantize_bounded(u)
     indices=(z*HALF+HALF).long().clamp(0,31).reshape(-1,64)
     counts=torch.stack([(indices==j).sum(0) for j in range(32)],-1).float();ctx.sum(counts)
     err=torch.stack(((z-u/HALF).square().sum(),u.new_tensor(u.numel())));ctx.sum(err)
@@ -221,7 +223,8 @@ def latent_log(g,ctx,tb,root,it):
         sat=((counts[:,0]+counts[:,-1])/counts.sum(-1).clamp_min(1)).cpu().tolist()
         gs=[p.grad.square().sum() for p in pi.enc.parameters() if p.grad is not None]
         grad=torch.stack(gs).sum().sqrt() if gs else torch.zeros((),device=g["dev"])
-        result=dict(iteration=it,mode=g["args"].latent_mode,quantization_mse=float(err[0]/err[1]),
+        result=dict(iteration=it,mode=g["args"].latent_mode,observation_mode=pi.observation_mode,
+                    orientation_condition="current_reference_aligned" if pi.observation_mode=="proprio93" else "reference_only",quantization_mse=float(err[0]/err[1]),
                     used_levels=used,utilization=[x/32 for x in used],saturation=sat,encoder_grad_norm=float(grad))
         with (root/"latent_metrics.jsonl").open("a") as f:f.write(json.dumps(result)+"\n")
         if tb:

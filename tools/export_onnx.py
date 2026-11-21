@@ -23,6 +23,7 @@ import os
 import re
 
 import onnx
+from blinkmimic.policy_inputs import policy_action, update_norms, normalizer_inputs, matrix_from_6d
 import torch
 from torch import nn
 
@@ -32,7 +33,7 @@ from blinkmimic.mdp import obs_dim
 from blinkmimic.motion import CONTROL_DT, MotionLib
 from blinkmimic.networks import Policy, policy_kwargs
 from blinkmimic.robot import RobotSpec, get_robot
-from blinkmimic.rotations import mat_to_quat
+from blinkmimic.rotations import mat_to_quat, mat_to_6d, so3_exp
 
 OUTPUTS = ["actions", "joint_pos", "joint_vel", "body_pos_w", "body_quat_w", "body_lin_vel_w", "body_ang_vel_w", "next_anchor_quat_w"]
 
@@ -50,11 +51,17 @@ class PolicyWithMotion(nn.Module):
         self.register_buffer("body_v", motion.body_v)
         self.register_buffer("body_w", motion.body_w)
         self.last = motion.num_frames - 1
+        if pi.observation_mode=="proprio93":
+            self.register_buffer("relative_future",motion.root_R.transpose(-1,-2)[:,None] @ motion.root_R[motion.future_frames(f,K)])
 
     def forward(self, obs_history: torch.Tensor, time_step: torch.Tensor):
         f = time_step.round().long().clamp(0, self.last).reshape(-1)
         f1 = (f + 1).clamp(max=self.last)
-        a = self.pi(obs_history, self.goal[f])
+        orientation=None
+        if self.pi.observation_mode=="proprio93":
+            current=matrix_from_6d(obs_history[:,-1,-6:])
+            orientation=mat_to_6d(current[:,None]@self.relative_future[f])
+        a = policy_action(self.pi,obs_history,self.goal[f],orientation)
         return a, self.q[f], self.qd[f], self.body_p[f], self.body_quat[f], self.body_v[f], self.body_w[f], self.body_quat[f1, 0]
 
 
@@ -77,7 +84,7 @@ def main():
 
     dev = "cpu"
     robot = get_robot(a.robot)
-    ck = torch.load(a.ckpt, map_location=dev)
+    ck = torch.load(a.ckpt, map_location=dev, weights_only=False)
     K, Hh = ck["args"]["goal_frames"], ck["args"]["hist"]
     motion = MotionLib([a.motion], Kinematics(robot, dev), dev, robot.load_motion)
     networks.AMP_DTYPE = None  # fp32 graph (training ran the MLPs under bf16 autocast)
@@ -88,6 +95,7 @@ def main():
     model = PolicyWithMotion(pi, motion, K).eval()
 
     obs = torch.zeros(1, Hh, obs_dim(robot.num_joints))
+    if pi.observation_mode=="proprio93":obs[...,-6:]=torch.tensor([1.,0.,0.,1.,0.,0.])
     t = torch.zeros(1, 1)
     torch.onnx.export(model, (obs, t), a.out, input_names=["obs_history", "time_step"], output_names=OUTPUTS,
                       opset_version=18, dynamo=False)  # fmt: skip
@@ -96,6 +104,10 @@ def main():
     fmt = lambda xs: ",".join(f"{float(x):.6g}" for x in xs)  # noqa: E731
     meta = {
         "run_path": os.path.abspath(a.ckpt),
+        "policy_observation_mode": pi.observation_mode,
+        "decoder_obs_dim": str(pi.obs_norm.mean.numel()),
+        "interface_kind": "legacy99_feature_packet_with_baked_motion",
+        "encoder_orientation": "future10_relative_to_current_robot" if pi.observation_mode=="proprio93" else "reference_only",
         "motion": os.path.splitext(os.path.basename(a.motion))[0],
         "motion_num_frames": str(motion.num_frames),
         "joint_names": ",".join(robot.joint_names),
@@ -128,7 +140,9 @@ def main():
     err = 0.0
     with torch.no_grad():
         for f in torch.randint(0, motion.num_frames, (64,)).tolist():
-            o = pi.obs_norm.mean + pi.obs_norm.std() * torch.randn(1, Hh, obs.shape[-1])
+            o = pi.obs_norm.mean + pi.obs_norm.std() * torch.randn(1,Hh,pi.obs_norm.mean.numel())
+            if pi.observation_mode=="proprio93":
+                o=torch.cat((o,mat_to_6d(so3_exp(torch.randn(1,Hh,3)))),-1)
             t = torch.tensor([[float(f)]])
             ref = model(o, t)
             out = sess.run(None, {"obs_history": o.numpy(), "time_step": t.numpy()})

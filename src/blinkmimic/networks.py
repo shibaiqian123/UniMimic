@@ -215,7 +215,7 @@ class Policy(nn.Module):
     ``offset``; the network only learns the correction to tracking the reference with the PD controller."""
 
     def __init__(self, obs_dim: int, goal_dim: int, act_dim: int, hist: int = 10, z_dim: int = 32,
-                 enc_hidden=(2048, 1024, 512, 256), dec_hidden=(2048, 1024, 512, 256), ref_skip=None, latent_mode="continuous32"):  # fmt: skip
+                 enc_hidden=(2048, 1024, 512, 256), dec_hidden=(2048, 1024, 512, 256), ref_skip=None, latent_mode="continuous32", observation_mode="legacy99"):  # fmt: skip
         super().__init__()
         from .latent import spec
         self.latent_mode = latent_mode
@@ -224,46 +224,61 @@ class Policy(nn.Module):
             z_dim = 64
             # A persistent marker prevents same-shaped continuous64/FSQ checkpoints mixing.
             self.register_buffer("_latent_kind", torch.tensor(1. if latent_mode=="continuous64" else 2.))
+        from .observation_contract import validate_args as validate_observation
+        self.observation_spec=validate_observation(dict(observation_mode=observation_mode,
+            latent_mode=latent_mode,pi_ref_skip=ref_skip is not None))
+        self.observation_mode=observation_mode
+        self.goal_dim=goal_dim
+        if observation_mode=="proprio93":
+            if act_dim!=29 or obs_dim not in (93,99) or goal_dim!=730 or hist!=10:
+                raise ValueError("proprio93 supports G1 29DoF only")
+            obs_dim=93
+            self.register_buffer("_observation_kind",torch.tensor(2.))
         self.hist = hist
         self.ref_off = None
         if ref_skip is not None:
             self.ref_off = ref_skip[0]
             self.register_buffer("ref_q0", torch.tensor(ref_skip[1], dtype=torch.float32))
             self.register_buffer("ref_alpha", torch.tensor(ref_skip[2], dtype=torch.float32))
-        self.enc = mlp(goal_dim, list(enc_hidden), z_dim)
+        self.enc = mlp(goal_dim + (60 if observation_mode=="proprio93" else 0), list(enc_hidden), z_dim)
         self.dec = mlp(z_dim + obs_dim * hist, list(dec_hidden), act_dim)
         with torch.no_grad():
             self.dec[-1].weight.mul_(0.01)
             self.dec[-1].bias.zero_()
         self.obs_norm = RunningNorm(obs_dim)
-        self.goal_norm = RunningNorm(goal_dim)
+        self.goal_norm = RunningNorm(goal_dim + (60 if observation_mode=="proprio93" else 0))
 
-    def forward(self, obs_hist: torch.Tensor, goal: torch.Tensor, z: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, obs_hist: torch.Tensor, goal: torch.Tensor, z: torch.Tensor | None = None, orientation6d_future: torch.Tensor | None = None) -> torch.Tensor:
         """obs_hist: (B, hist, obs_dim) noisy observations, newest last. ``z`` (optional) is
         ``encode(goal)`` computed beforehand."""
         o = self.obs_norm(obs_hist).flatten(-2)
         if z is None:
-            z = self.encode(goal)
+            z = self.encode(goal,orientation6d_future)
         a = run_mlp(self.dec, torch.cat((z, o), -1))
         if self.ref_off is not None:
             q_ref = goal[..., self.ref_off : self.ref_off + a.shape[-1]]
             a = a + (q_ref - self.ref_q0) / self.ref_alpha
         return a
 
-    def encode(self, goal: torch.Tensor) -> torch.Tensor:
-        """Motion latent z from the goal features (reference only, independent of the robot state)."""
+    def encode(self, goal: torch.Tensor, orientation6d_future=None) -> torch.Tensor:
+        """Legacy: reference-only. proprio93: reference plus robot-relative future orientation."""
         if self.latent_mode == "continuous32":
-            return torch.tanh(self.enc_raw(goal))
-        return self.encode_tokens(goal).flatten(-2)
+            return torch.tanh(self.enc_raw(goal,orientation6d_future))
+        return self.encode_tokens(goal,orientation6d_future).flatten(-2)
 
-    def enc_raw(self, goal):
+    def enc_raw(self, goal, orientation6d_future=None):
+        if self.observation_mode=="proprio93":
+            if orientation6d_future is None:raise ValueError("proprio93 motion encoder needs explicit orientation6d_future")
+            if orientation6d_future.shape[-2:]!=(10,6):
+                raise ValueError("future orientation must be [B,10,6]")
+            goal=torch.cat((goal,orientation6d_future.flatten(-2)),-1)
         return run_mlp(self.enc, self.goal_norm(goal))
 
-    def encode_tokens(self, goal):
+    def encode_tokens(self, goal, orientation6d_future=None):
         from .latent import bound, quantize_bounded, HALF
         if self.latent_mode == "continuous32":
-            return torch.tanh(self.enc_raw(goal)).unflatten(-1, (1,32))
-        u = bound(self.enc_raw(goal))
+            return torch.tanh(self.enc_raw(goal,orientation6d_future)).unflatten(-1, (1,32))
+        u = bound(self.enc_raw(goal,orientation6d_future))
         z = quantize_bounded(u) if self.latent_mode=="fsq64" else u / HALF
         return z.unflatten(-1, (2,32))
 
@@ -280,6 +295,13 @@ class Policy(nn.Module):
         if hasattr(self, "_latent_kind") and key in state_dict:
             if int(state_dict[key]) != int(self._latent_kind):
                 raise ValueError("checkpoint latent mode mismatch")
+        obs_key=prefix+"_observation_kind"
+        if hasattr(self,"_observation_kind") and obs_key not in state_dict:
+            raise ValueError("cannot load legacy99 checkpoint into proprio93; retrain separately")
+        if hasattr(self,"_observation_kind") and obs_key in state_dict and float(state_dict[obs_key])!=2.:
+            raise ValueError("current-only orientation checkpoint unsupported; retrain with future window")
+        if not hasattr(self,"_observation_kind") and obs_key in state_dict:
+            raise ValueError("cannot load proprio93 checkpoint into legacy99")
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
 
@@ -313,7 +335,10 @@ def policy_kwargs(a_: dict, robot) -> dict:
     check_pruned(a_, nets_only=True)
     from .latent import validate_args
     spec = validate_args(a_)
-    return {"ref_skip": policy_ref_skip(a_, robot), "latent_mode": spec["mode"]}
+    from .observation_contract import validate_args as validate_observation
+    observation=validate_observation(a_)
+    return {"ref_skip": policy_ref_skip(a_, robot), "latent_mode": spec["mode"],
+            "observation_mode":observation["mode"]}
 
 
 def policy_ref_skip(a_: dict, robot):

@@ -2,6 +2,7 @@
 import argparse,json
 from pathlib import Path
 import numpy as np
+from blinkmimic.policy_inputs import policy_action, update_norms, normalizer_inputs, environment_orientation
 import torch
 from blinkmimic.deploy.core import Bundle,digest
 from blinkmimic.robot import get_robot
@@ -37,7 +38,7 @@ def main():
     with torch.no_grad():
         for i in range(min(a.steps or b.T-1,b.T-1)):
             o=env.observe();history=o[:,None].repeat(1,10,1) if history is None else torch.cat((history[:,1:],o[:,None]),1)
-            action=pi(history,motion.goal(env.f,10))
+            action=policy_action(pi,history,motion.goal(env.f,10),environment_orientation(pi,env,motion,10))
             result=env.step(action);S=env.state()
             records.append(dict(frame=i,q=S[4][0].cpu().numpy().copy(),root_p=S[0][0].cpu().numpy().copy(),
                                 action=action[0].cpu().numpy().copy()))
