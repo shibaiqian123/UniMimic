@@ -92,13 +92,37 @@ class Bundle:
                 raise ValueError("invalid reference rotation")
         self.fingerprint = digest(self.path/"deploy_config.json")
 
+def inference_device(value):
+    if value=="cpu":return value
+    if value.startswith("cuda:") and value[5:].isdigit():return "cuda:"+str(int(value[5:]))
+    raise ValueError("inference device must be cpu or cuda:N")
+
 class OnnxPolicy:
-    def __init__(self, bundle):
+    def __init__(self, bundle, device="cpu"):
+        device=inference_device(device)
         import onnxruntime as ort
+        if device!="cpu":
+            if "CUDAExecutionProvider" not in ort.get_available_providers():
+                raise RuntimeError("CUDAExecutionProvider unavailable: install compatible onnxruntime-gpu; no CPU fallback")
+            # Reuse already-installed CUDA/cuDNN libraries, before opening any DDS writer.
+            try:
+                import torch
+            except ImportError:pass
+            if hasattr(ort,"preload_dlls"):ort.preload_dlls()
         so = ort.SessionOptions()
         so.intra_op_num_threads = so.inter_op_num_threads = 1
         so.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        self.session = ort.InferenceSession(str(bundle.path/"policy.onnx"), so, providers=["CPUExecutionProvider"])
+        providers=["CPUExecutionProvider"] if device=="cpu" else [
+            ("CUDAExecutionProvider",{"device_id":int(device.split(":")[1]),"use_tf32":0}),
+            "CPUExecutionProvider"]
+        self.session = ort.InferenceSession(str(bundle.path/"policy.onnx"), so, providers=providers)
+        if device!="cpu" and "CUDAExecutionProvider" not in self.session.get_providers():
+            raise RuntimeError("CUDA provider failed to initialize; refusing silent CPU fallback")
+        self.session.disable_fallback()
+        self.info=dict(requested_device=device,providers=self.session.get_providers(),
+                       provider_options=self.session.get_provider_options(),onnxruntime=ort.__version__,
+                       precision="float32; CUDA TF32 disabled",timing="CPU input to CPU action, including transfers")
+
         ins = {i.name:i.shape for i in self.session.get_inputs()}
         outs={o.name:o.shape for o in self.session.get_outputs()}
         if outs.get("actions",[None,None])[1:] != [29]:

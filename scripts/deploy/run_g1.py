@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 sys.path.insert(0,str(Path(__file__).resolve().parent/"bridge"))
 import g1_bridge_io as gb
-from blinkmimic.deploy.core import Bundle, STAGES
+from blinkmimic.deploy.core import Bundle, STAGES, OnnxPolicy, inference_device
 from blinkmimic.deploy.controller import Controller
 from blinkmimic.deploy.lowstate import decode_snapshot
 from blinkmimic.deploy.snapshot import read_snapshot
@@ -20,6 +20,7 @@ from blinkmimic.deploy.session import DEFAULT_PROFILE,new_session
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--inference-device",type=inference_device,default="cpu",help="cpu or cuda:N; CUDA is explicit and never silently falls back")
     ap.add_argument("--cpu-affinity",help="comma-separated Linux CPUs for control, applied before ONNX initialization")
     ap.add_argument("--logger-cpus",default=os.environ.get("BLINK_LOG_CPUS"))
     ap.add_argument("--bridge-cpus",default=os.environ.get("BLINK_BRIDGE_CPUS"))
@@ -45,23 +46,25 @@ def main():
     profile=dict(DEFAULT_PROFILE)
     if a.hardware_profile:profile.update(json.loads(a.hardware_profile.read_text()))
     profile.pop("verified_on_this_robot",None)
-    ctl=Controller(b,profile,a.stage)
+    policy=OnnxPolicy(b,a.inference_device)
+    ctl=Controller(b,profile,a.stage,policy=policy)
+    print("Inference: "+json.dumps(policy.info),flush=True)
     if a.inject_fault:
         original=ctl.core.policy
         calls=[0]
-        def injected(h,g):
+        def injected(*inputs):
             calls[0]+=1
             if calls[0]>=10:
                 if a.inject_fault=="nan": return np.full(29,np.nan)
                 time.sleep(.04)
-            return original(h,g)
+            return original(*inputs)
         ctl.core.policy=injected
     if not a.sim and not a.read_only:
         if input("Robot supported / area clear / L2+B ready? Type yes: ").strip()!="yes":return
     a.log_dir=new_session(a.log_dir.resolve())
     print(f"Runner logs: {a.log_dir}",flush=True)
     log=RuntimeLog(a.log_dir/"runner.jsonl",cpu_list(a.logger_cpus))
-    log.write(dict(event="start",bundle_fingerprint=b.fingerprint,config=b.cfg,
+    log.write(dict(event="start",bundle_fingerprint=b.fingerprint,config=b.cfg,inference=policy.info,
                               temperature_channels=["casing","winding"],
                               temperature_channel_source="unitreerobotics/unitree_sdk2 include/unitree/robot/g1/common/terminations.hpp",
                               torque_log_semantics={"s.tau":"LowState tau_est, Nm",

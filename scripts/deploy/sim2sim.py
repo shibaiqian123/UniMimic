@@ -10,7 +10,7 @@ import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"src"))
 import mujoco
 import numpy as np
-from blinkmimic.deploy.core import Bundle,OnnxPolicy
+from blinkmimic.deploy.core import Bundle,OnnxPolicy,inference_device
 from blinkmimic.deploy.sim2sim import Plant,Experiment
 
 def floats(s):
@@ -177,6 +177,7 @@ def main():
     ap.add_argument("--precision",choices=["checkpoint","none","bf16"],default="checkpoint")
     ap.add_argument("--record",action="store_true",help="warp: record selected replica trajectory")
     ap.add_argument("--screenshot",action="store_true",help="warp headless: render final state to out/viewer.png (MUJOCO_GL=egl)")
+    ap.add_argument("--inference-device",type=inference_device,default="cpu",help="final runner: cpu or cuda:N (physics stays CPU)")
     ap.add_argument("--rt-priority",type=int,default=0,help="final only: optional SCHED_RR priority 1..10; requires OS permission, no silent fallback")
     ap.add_argument("--runtime-affinity",choices=["auto","none"],default="auto",help="final: separate physics, DDS, control, and logging CPU resources")
     ap.add_argument("--auto",action="store_true",help="final simulation only: send the same keyboard/button events automatically")
@@ -194,6 +195,7 @@ def main():
             configure_opengl(a.gl_renderer)
         from blinkmimic.deploy.final_session import run
         run(a);return
+    if a.inference_device!="cpu":ap.error("--inference-device is for --cmd final; use existing --backend/--device for diagnostic modes")
     if a.out.exists():
         from blinkmimic.deploy.session import new_session
         a.out=new_session(a.out)

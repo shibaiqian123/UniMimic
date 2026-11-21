@@ -31,7 +31,7 @@ def run(a):
     session=new_session(a.out.resolve())
     meta=dict(kind="blink_final_sim",domain=a.dds_domain,iface="lo",bundle=str(a.bundle.resolve()),
               bundle_fingerprint=b.fingerprint,unitree_xml=str(a.unitree_xml.resolve()),
-              rt_priority=priority,runtime_affinity=plan,stage=a.stage,sensor_profile=DEFAULT_PROFILE,physics_hz=1000,lowstate_hz=1000,
+              inference_device=getattr(a,"inference_device","cpu"),rt_priority=priority,runtime_affinity=plan,stage=a.stage,sensor_profile=DEFAULT_PROFILE,physics_hz=1000,lowstate_hz=1000,
               lowcmd_hz=500,policy_hz=50,auto=a.auto)
     atomic_json(session/"session.json",meta)
     ipc=SimIPC(session/"sim.mmap",create=True)
@@ -63,7 +63,7 @@ def run(a):
         bridge=spawn("sim_bridge",[str(BRIDGE/"g1_sim_bridge"),str(session/"sim.mmap"),str(a.dds_domain)])
         runner=spawn("runner",[sys.executable,"-u",str(ROOT/"scripts/deploy/run_g1.py"),
             "--bundle",str(a.bundle.resolve()),"--iface","lo","--domain",str(a.dds_domain),"--sim",
-            "--stage",a.stage,"--log-dir",str(session/"runner"),"--status-file",str(session/"runner_status.json")])
+            "--stage",a.stage,"--inference-device",getattr(a,"inference_device","cpu"),"--log-dir",str(session/"runner"),"--status-file",str(session/"runner_status.json")])
         if a.viewer:
             window=spawn("viewer",[sys.executable,"-u","-m","blinkmimic.deploy.final_view","--session",str(session),
                 "--gl-renderer",a.gl_renderer,"--render-hz",str(a.render_hz)])
@@ -157,6 +157,7 @@ def run(a):
             for line in f:
                 try:records.append(json.loads(line))
                 except ValueError:pass
+        runtime["inference"]=next((r.get("inference") for r in records if r.get("event")=="start"),None)
         for field in ("controller_ms","controller_thread_cpu_ms","policy_inference_ms","policy_inference_thread_cpu_ms"):
             vals=[r[field] for r in records if isinstance(r.get(field),(int,float))]
             runtime["max_"+field]=max(vals) if vals else None

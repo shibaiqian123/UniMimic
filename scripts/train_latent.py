@@ -28,7 +28,7 @@ def main():
     if any(x.split("=")[0] in forbidden for x in extra):
         ap.error("use wrapper options for mode/data/log/seed/resume; reference skip is forbidden")
     paths=sorted(a.motion_dir.resolve().glob("*.csv"))
-    if len(paths)!=40:ap.error(f"matched LAFAN1 recipe requires 40 CSV clips, found {len(paths)}")
+    if not paths:ap.error(f"no CSV clips found in {a.motion_dir}")
     files=[dict(name=p.name,sha256=hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths]
     prefix=([sys.executable,"-u","-m","blinkmimic.train"] if a.gpus==1 else
             [sys.executable,"-u","-m","torch.distributed.run","--standalone","--nnodes=1","--nproc-per-node=2","-m","blinkmimic.train"])
@@ -36,8 +36,8 @@ def main():
          "--latent-mode",a.latent_mode,"--observation-mode",a.observation_mode,"--motion_dir",str(a.motion_dir.resolve()),
          "--log_dir",str(a.log_dir.resolve()),"--seed",str(a.seed),*extra]
     if a.resume:cmd+=["--resume",str(a.resume.resolve())]
-    manifest=dict(protocol="lafan40_matched_v1",mode=a.latent_mode,observation_mode=a.observation_mode,seed=a.seed,gpus=a.gpus,
-                  split="all 40 training clips; evaluation on the same clips is in-distribution",
+    manifest=dict(protocol="csv_motion_recipe_v1",clip_count=len(paths),mode=a.latent_mode,observation_mode=a.observation_mode,seed=a.seed,gpus=a.gpus,
+                  split="all selected clips are training data; same-list evaluation is in-distribution",
                   files=files,command=cmd)
     print(shlex.join(cmd),flush=True)
     if a.dry_run:return
@@ -45,7 +45,8 @@ def main():
     dest=a.log_dir/"experiment.json"
     if dest.exists():
         old=json.loads(dest.read_text())
-        if not a.resume or old.get("gpus",1)!=a.gpus or old.get("observation_mode","legacy99")!=a.observation_mode or any(old[k]!=manifest[k] for k in ("protocol","mode","seed","files")):
+        compatible_protocol=old.get("protocol")==manifest["protocol"] or (old.get("protocol")=="lafan40_matched_v1" and len(files)==40)
+        if not compatible_protocol or not a.resume or old.get("gpus",1)!=a.gpus or old.get("observation_mode","legacy99")!=a.observation_mode or any(old[k]!=manifest[k] for k in ("mode","seed","files")):
             ap.error("existing experiment requires matching resume; use a new output directory")
     elif (a.log_dir/"last.pt").exists():
         ap.error("existing checkpoint without experiment manifest; use a new output directory")

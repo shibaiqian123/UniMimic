@@ -246,3 +246,37 @@ RLIMIT_RTPRIO、timer slack和内核RT配额。以实际读取值为准，不再
     .venv/bin/python scripts/deploy/timing_probe.py --cpu 62 --seconds 60 --out deploy_logs/timing_probe_normal.json
 同一已授予RLIMIT_RTPRIO的终端可以加 --rt-priority 10 做对照；
 无权限明确报错，实际策略会打印出来。不要把单次探针正常当成整套部署验收。
+
+
+### CPU / GPU 策略推理选择
+
+run_g1.py 与 sim2sim.py --cmd final 新增 --inference-device cpu|cuda:N，默认cpu。
+CUDA_VISIBLE_DEVICES限定可见设备后，cuda:0表示第一张可见GPU。
+final仍使用CPU MuJoCo物理，只更换共用runner中的ONNX推理执行器，
+不等同于 --backend warp 的诊断入口。不要将 --backend warp 与final混用。
+显式CUDA请求需要CUDAExecutionProvider；初始化失败明确报错，不静默回退为纯CPU。
+provider列表、设备与provider参数记入runner start日志。CUDA TF32关闭；
+session.run返回CPU action，已有推理计时包含输入/输出拷贝和同步。
+CPU provider保留用于ORT可能分配的辅助算子，不声称全部算子均在GPU执行。
+
+229依赖替换为onnxruntime-gpu==1.23.2（CUDA12/cuDNN9，同时支持CPU）。CPU版和GPU版发行包共享
+onnxruntime模块，不要同时安装；更换时先卸载CPU版再装与CUDA兼容的GPU版。
+启动时复用已安装PyTorch CUDA库并调用ORT preload_dlls；依赖加载失败不跳过报错。
+
+离线回放对照工具 scripts/deploy/benchmark_inference.py 接收 --bundle、--runner-log、--out，
+不连接DDS。比较真实记录重建的历史和目标输入，最大action误差阈值1e-3，
+并按50Hz测CPU/GPU端到端p50、p99、最大耗时及超过20ms次数。
+这不是硬实时保证，也不替代完整仿真和真实硬件验证。
+
+GPU验证（2026-11-21）：
+- gpu_inference_parity.json：回放128组真实输入，CPU/CUDA动作最大误差6.1989e-6，通过1e-3阈值。
+- 50Hz各500次端到端采样：CPU p50/p99/max=2.806/3.050/7.542ms；
+  CUDA=6.193/7.274/7.448ms，两者超过20ms次数均为0。此次GPU未比CPU更快。
+- ORT1.32.0 CPU → ORT1.23.2 CPU，128组输入最大action差0。
+- final_cuda_validation/20261121_212812_405542：CUDA实际启用，进入STANDBY_PRE后
+  发生control loop overrun（wake_late=41.75ms，cycle=61.55ms）；未播放完整动作。
+  因此只证明GPU入口接通，不证明系统级等待尖峰已解决，更不代表硬件验证。
+
+final示例在原命令追加 --inference-device cuda:0；仍使用 --backend cpu。
+run_g1示例在原实机命令追加 --inference-device cuda:0，其他iface/domain/stage/bundle保持原值。
+CUDA_VISIBLE_DEVICES=0只选择可见显卡，必须同时指定--inference-device才会切换执行器。

@@ -93,6 +93,7 @@ def main():
             w,h=glfw.get_framebuffer_size(win);viewport=mujoco.MjrRect(0,0,w,h)
             mujoco.mjr_render(viewport,scene,context)
             text=(f"FINAL SIM / CPU official G1 / real runner via DDS domain {meta['domain']}\n"
+                  f"Policy inference: {meta.get('inference_device','cpu')}\n"
                   f"State: {rs.get('state','WAITING')} | frame {frame}/{b.T-1} | sim {s['sim_time']:.2f}s\n"
                   f"Support: {bool(s['support'])} | input: {flags['last_key']} | remote bits: {s['keys']}\n"
                   f"Physics-wall lag: {ps.get('lag_s',0)*1000:.1f}ms | sensor model: SuperMimic reference (uncalibrated)\n"
