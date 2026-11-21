@@ -59,6 +59,10 @@ def main():
     print(f"Runner logs: {a.log_dir}",flush=True)
     log=open(a.log_dir/"runner.jsonl","w",buffering=1)
     log.write(json.dumps(dict(event="start",bundle_fingerprint=b.fingerprint,config=b.cfg,
+                              temperature_channels=["casing","winding"],
+                              temperature_channel_source="unitreerobotics/unitree_sdk2 include/unitree/robot/g1/common/terminations.hpp",
+                              torque_log_semantics={"s.tau":"LowState tau_est, Nm",
+                                  "result.pd_torque_estimate":"PD estimate at sampled q/dq; not measured torque"},
                               profile=profile,effective_limits=ctl.limits,effective_stage=ctl.stage,arguments={k:str(v) for k,v in vars(a).items()}))+"\n")
     stop=[False]
     for sig in (signal.SIGINT,signal.SIGTERM):

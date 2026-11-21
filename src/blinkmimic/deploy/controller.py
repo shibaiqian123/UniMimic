@@ -1,7 +1,7 @@
 """Single-motion state machine shared by the DDS runner and deterministic tests."""
 import time
 import numpy as np
-from .core import DeployCore, state_guard, limit_target, transform_imu, sensor_transform
+from .core import JOINTS, DeployCore, state_guard, limit_target, transform_imu, sensor_transform
 
 PREP=(1<<5)|(1<<12)
 ARM=(1<<0)|(1<<8)
@@ -88,7 +88,11 @@ class Controller:
                 target=self.b.motion["q"][0]
                 if event&ARM==ARM:
                     if now-self.since<self.limits["hold_s"]:self.reject_reason="HOLD needs at least 1 second"
-                    elif abs(s["q"]-target).max()>=self.limits["hold_tol"]:self.reject_reason="not at start pose"
+                    elif abs(s["q"]-target).max()>=self.limits["hold_tol"]:
+                        j=int(np.argmax(abs(s["q"]-target)))
+                        self.reject_reason=(f"not at start pose: {JOINTS[j]} "
+                            f"error={abs(s['q'][j]-target[j]):.3f}rad "
+                            f"limit={self.limits['hold_tol']:.3f}rad")
                     elif abs(s["dq"]).max()>=self.limits["start_max_dq"]:self.reject_reason="joint velocity not settled"
                     elif tilt>=self.limits["start_tilt"]:self.reject_reason="start tilt not settled"
                     elif np.max(s["temp"])>self.limits["warn_temperature"]:self.reject_reason="motor temperature too high to start"
@@ -108,7 +112,13 @@ class Controller:
                 target=result["target"]
                 if self.core.phase=="post" and self.state=="POLICY":
                     self.transition("STANDBY_POST",now)
+            requested_target=np.array(target,copy=True)
             target,n=limit_target(target,s["q"],s["dq"],self.b,self.stage,kp,kd)
+            # Diagnostic PD estimate at this sensor snapshot, not measured motor torque.
+            result.update(requested_target=requested_target,
+                          requested_target_error=requested_target-s["q"],
+                          pd_torque_estimate=kp*(target-s["q"])-kd*s["dq"],
+                          torque_limit=self.b.effort*self.stage["torque_fraction"])
             result.update(target=target,kp=kp,kd=kd,n_clamped=n,tilt=tilt,state=self.state,reject_reason=self.reject_reason)
             if self.core.history is not None:
                 result["observation"]=self.core.history[-1].copy()

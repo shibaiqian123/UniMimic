@@ -102,3 +102,26 @@ def test_preheld_button_does_not_arm():
     for t in (.4,.5):
         s=state(t); s["keys"]=PREP; c.update(s,t)
     assert c.state=="INTERP"
+
+@pytest.mark.parametrize("channel,label",[(0,"casing"),(1,"winding")])
+def test_temperature_fault_identifies_channel_at_unchanged_threshold(channel,label):
+    c=Controller(bundle(),PROFILE,"air",lambda h,g:np.zeros(29))
+    s=state(1.);s["temp"][23,channel]=79.
+    c.update(s,1.)
+    assert c.state=="PASSIVE"
+    s["temp"][23,channel]=80.
+    c.update(s,1.)
+    assert c.state=="DAMP"
+    assert c.reason==f"overtemperature: right_shoulder_roll_joint {label} 80.0C >= 80.0C"
+
+def test_target_diagnostics_distinguish_requested_and_limited_command():
+    b=bundle(); b.motion["q"][0,:]=2.
+    c=Controller(b,PROFILE,"air",lambda h,g:np.zeros(29))
+    c.core.align(np.eye(3));c.state="HOLD"
+    s=state(5.);out=c.update(s,5.)
+    np.testing.assert_allclose(out["requested_target"],2.)
+    np.testing.assert_allclose(out["requested_target_error"],2.)
+    np.testing.assert_allclose(out["target"],1.)
+    np.testing.assert_allclose(out["pd_torque_estimate"],50.)
+    np.testing.assert_allclose(out["torque_limit"],50.)
+    assert out["n_clamped"]==29

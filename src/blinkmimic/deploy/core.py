@@ -206,7 +206,10 @@ def state_guard(s, now, b, stage, limits=LIMITS, check_velocity=True):
     if np.any(s["motorstate"]):
         return "motor fault"
     if np.max(s["temp"]) >= limits["max_temperature"]:
-        return "overtemperature"
+        joint,channel = np.unravel_index(np.argmax(s["temp"]),np.shape(s["temp"]))
+        label = ("casing","winding")[channel]
+        return (f"overtemperature: {JOINTS[joint]} {label} "
+                f"{s['temp'][joint,channel]:.1f}C >= {limits['max_temperature']:.1f}C")
     if check_velocity and (np.abs(s["dq"]) > b.velocity*stage["velocity_fraction"]).any():
         return "joint overspeed"
     try:

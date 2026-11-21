@@ -51,7 +51,7 @@ def test_refused_start_is_reported_not_a_fault():
         if t==2.:c.keys_released=True
         out=c.update(s,t)
     assert c.state=="HOLD"
-    assert out["reject_reason"]=="not at start pose"
+    assert out["reject_reason"].startswith("not at start pose: left_hip_pitch_joint error=0.200rad")
 
 def test_position_limit_is_not_an_added_software_stop_or_clip():
     b=bundle();s=state(1.);s["q"][0]=2.2
@@ -73,9 +73,12 @@ def test_lowstate_roundtrip_preserves_observation_6d_goal_and_actions():
         if 5.5<t<5.8:s["keys"]=ARM
         if 9.<t<9.3:s["keys"]=PLAY
         wire={k:np.asarray(s[k],np.float32).astype(float) for k in ("q","dq","temp","motorstate","gyro","quat")}
-        wire.update(acc=np.zeros(3),t_rx=t,t_tick_change=t,mode_machine=5,mode_pr=0,tick=i,
+        wire.update(tau=np.arange(29,dtype=float),acc=np.zeros(3),t_rx=t,t_tick_change=t,mode_machine=5,mode_pr=0,tick=i,
                     wireless_remote=np.array([0,0,s["keys"]&255,s["keys"]>>8]+[0]*36,np.uint8))
-        result1=direct.update(s,t);result2=decoded.update(decode_snapshot(wire),t)
+        decoded_state=decode_snapshot(wire)
+        np.testing.assert_array_equal(decoded_state["tau"],wire["tau"])
+        assert not np.shares_memory(decoded_state["tau"],wire["tau"])
+        result1=direct.update(s,t);result2=decoded.update(decoded_state,t)
         assert direct.state==decoded.state
         if direct.core.history is not None:
             np.testing.assert_allclose(direct.core.history,decoded.core.history,atol=1e-7)

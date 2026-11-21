@@ -92,3 +92,89 @@ bash scripts/deploy/bridge/build.sh \
 成功要求完整流程完成、POLICY 期间无支撑、无异常退出，并且物理时间与墙钟的差值 P99 和末次差值均不超过 20ms。结束后另用真值评估高度/姿态跟踪误差（0.25m / R[2,2] 差 0.8）和关节 RMSE；这些量只写入最终结果，不回送控制器，也不在运行中形成另一套停止逻辑。正常停止段还记录支撑是否已恢复及阻尼后的物理状态变化；紧急停止不会等待这些条件。这里的时间差取活动物理循环采样，不包含结束后的轨迹压缩写盘。报告失败不会变成下一次启动的许可证要求。
 
 实现来源：SuperMimic-Repro-Sim2Real 的 bridge 与 IMU 参考模型，许可证保留在 scripts/deploy/bridge/LICENSE；Unitree CRC 的 BSD 许可证保留在其 LICENSES 子目录。旧 docs/VALIDATION.md 记录的是旧实现，不应作为当前启动说明。
+
+
+## 2026-11-21 首次实机准备阶段诊断
+
+来源：\`deploy_logs/real_proprio93_air/20261121_191918_285249/runner.jsonl\`。
+本次仅到 PASSIVE → INTERP → HOLD → DAMP，未执行策略。
+停止原因是应用层 80°C 阈值，不能记录为遥控正常停止或策略通过。
+
+- 最后 HOLD：左肩 roll 参考 1.667765 rad，实际 1.509677 rad，误差 0.158088 rad；
+  右肩 roll 参考 -1.620647 rad，实际 -1.463801 rad，误差 -0.156846 rad。
+- 准备 Kp=64.127804，Kd=1.924510；计算 PD 力矩分别约 +10.14 / -10.04 N·m。
+  air 阶段两肩限值为 12.5 N·m，当时 n_clamped=0。
+  以上是基于采样状态计算的指令力矩，不是已测得的实际力矩。
+- 右肩最后 HOLD 温度为 [45,79]°C，下一次状态到 [45,80]°C 后进入 DAMP。
+  Unitree SDK2 的 terminations.hpp 将 temperature[0] 定义为 casing，
+  temperature[1] 定义为 winding；不能解释成外壳达到 80°C。
+- 官方示例分别提供外壳 85°C、绕组 120°C 的默认检测阈值，但这些不是
+  本机标定结果；本次未据此放宽现有 80°C 应用阈值。
+- 旧日志没有保存 tau_est，不能据此判定重力负载、外部干涉或机械限制中的哪一种
+  是主要原因。准备阶段长期保持该姿态没有消除误差，却持续升温。
+
+来源：https://github.com/unitreerobotics/unitree_sdk2/blob/main/include/unitree/robot/g1/common/terminations.hpp
+
+### 新增日志字段
+
+- s.tau：LowState 的 tau_est，单位 N·m。只读模式同样保存。
+- result.requested_target：力矩限幅前的目标角。
+- result.requested_target_error：原目标角减当前实测角。
+- result.pd_torque_estimate：按实际下发目标角、Kp、Kd 和本次采样 q/dq 计算，
+  不代表电机实际输出，也不代表 bridge 两次 runner 更新之间每一时刻的力矩。
+- result.torque_limit：本阶段用于目标限幅的力矩上限。
+- 启动记录包含温度通道名称及来源；过温信息包含关节、通道、读数和阈值。
+- 起始姿态拒绝信息包含最大偏差关节、偏差及容差。
+
+本次修改仅补齐诊断，无新增启动门槛；没有修改增益、动作包、温度阈值或遥控流程。
+离线回归：test_deploy_runtime.py 与 test_final_pipeline.py，26 passed。
+没有自动重启实机控制。后续先核对肩部、吊带及末端负载，再依据新增遥测判断；
+不能通过本次日志修复宣称已解决物理升温或准备姿态偏差。
+
+
+## Dex1-1 URDF 仿真对照（2026-11-21）
+
+新增 tools/convert_deploy_urdf.py，将指定的 URDF 转为独立部署场景。
+使用 /home/cqu023/unitree_ros/robots/g1_description/g1_29dof_mode_15_with_dex1_1.urdf；
+保留 link 惯量、质量、几何和关节范围，四个 Dex1 手指滑动关节固定在零位。
+这表示双侧安装 Dex1-1 的固定夹爪形态，不是左侧拆除后的配置。
+转换不修改源 URDF，也不覆盖策略部署包。场景使用原目录中的 mesh 绝对路径。
+
+URDF 没有充分描述电机转子/传动等效动力学；通过必填 --dynamics-xml 显式沿用
+原官方 MuJoCo 模型同名关节的 armature、damping、frictionloss。
+scene_motor.json 记录来源指纹与每关节参数，不能视为本机辨识值。
+原始无上述参数的 scene.xml 仅作为失败诊断留档，出现腕关节振荡，不作为推荐入口。
+
+模型质量 34.129935 kg，与 URDF 总质量一致；旧官方场景约 35.112142 kg，
+两者并非仅手部不同，不能将全部差异归因于 Dex1-1。
+IMU 位于骨盆原点并对齐骨盆轴，仍属参考传感器配置；温度仍为合成输入，
+本仿真不预测绕组升温，也不代表实机验证。
+
+转换命令（229）：
+```bash
+cd /home/cqu023/blinkmimic
+PYTHONPATH=src .venv/bin/python tools/convert_deploy_urdf.py \
+  --urdf /home/cqu023/unitree_ros/robots/g1_description/g1_29dof_mode_15_with_dex1_1.urdf \
+  --dynamics-xml /home/cqu023/Documents/unitree_rl_lab/unitree_mujoco/unitree_robots/g1/scene_29dof.xml \
+  --out deploy_artifacts/models/g1_dex1_1/scene_motor.xml
+```
+
+交互仿真（仅回环接口，DDS domain 2）：
+```bash
+OMP_NUM_THREADS=1 .venv/bin/python scripts/deploy/sim2sim.py \
+  --cmd final --dds-domain 2 --stage ground \
+  --bundle deploy_artifacts/fsq64_proprio93_s0_3500_walk1 \
+  --unitree-xml deploy_artifacts/models/g1_dex1_1/scene_motor.xml \
+  --viewer --gl-renderer nvidia \
+  --out deploy_logs/final_dex1_1_view
+```
+1 准备，2 策略待机，B 切换模拟支撑，3 播放，D 阻尼停止。
+保持原始启动条件与控制增益，不为完成动作而放宽容差。
+
+自动 final 结果：deploy_logs/final_dex1_1_motor/20261121_195114_314506/report.json。
+PASSIVE → INTERP → HOLD → DAMP；timing_valid=true，passed=false，未进入策略。
+HOLD 最后100条样本中位数：左肩偏差 +0.120465 rad / 力矩 +7.725176 N·m，
+右肩偏差 -0.120244 rad / 力矩 -7.711009 N·m；腕 yaw 偏差约0.005 rad。
+拒绝原因为 left_shoulder_roll_joint error=0.120rad limit=0.100rad。
+该结果支持负载导致纯PD准备姿态偏差，但仍未复现实机约10 N·m肩部力矩，
+不能宣称模型已完全标定或walk已通过。原阈值、增益及策略包未变。
