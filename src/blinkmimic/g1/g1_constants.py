@@ -149,6 +149,23 @@ def load_lafan1_csv(path: str) -> MotionArrays:
     return p, quat, j, 30.0
 
 
+def load_bones_csv(path: str) -> MotionArrays:
+    """BONES-SEED G1: named columns, cm/degrees, 120 Hz; output in model joint order."""
+    from .bones import load_bones_csv as read_bones
+    return read_bones(path, G1_JOINT_NAMES)
+
+
+def load_g1_csv(path: str) -> MotionArrays:
+    """Dispatch headerless LAFAN1 and headered BONES without changing either time base."""
+    with open(path, encoding="utf-8-sig") as stream:
+        first = stream.readline().split(",", 1)[0].strip()
+    try:
+        float(first)
+    except ValueError:
+        return load_bones_csv(path)
+    return load_lafan1_csv(path)
+
+
 SPEC = RobotSpec(
     name="g1",
     mjcf_path=MJCF_PATH,
@@ -161,5 +178,5 @@ SPEC = RobotSpec(
     robot_cfg=get_robot_cfg,
     motion_dir=MOTION_DIR,
     motion_glob="*.csv",
-    load_motion=load_lafan1_csv,
+    load_motion=load_g1_csv,
 )
