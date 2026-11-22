@@ -44,3 +44,12 @@ def test_policy_cpu_timing_does_not_change_actions():
     np.testing.assert_array_equal(r["action"],np.ones(29)*.25)
     assert r["inference_thread_cpu_ms"]>=0
     assert r["inference_ms"]>=0
+
+def test_affinity_separates_dds_endpoints_when_cores_available():
+    plan=affinity_plan()
+    if "bridge" in plan:
+        critical=[set(plan[n]) for n in ("physics","sim_bridge","runner","bridge")]
+        for i,cpus in enumerate(critical):
+            assert not cpus.intersection(plan["viewer"])
+            for other in critical[i+1:]:assert not cpus.intersection(other)
+        assert len(plan["sim_bridge"])==2

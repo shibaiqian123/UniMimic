@@ -108,6 +108,10 @@ static void on_lowstate(const void* p) {
     snap_end();
     return;
   }
+  static double last_callback=0.;
+  if(last_callback>0 && t-last_callback>.01)
+    fprintf(stderr,"lowstate_gap t=%.9f gap_ms=%.3f tick=%u\n",t,(t-last_callback)*1000,m.tick());
+  last_callback=t;
   const uint32_t tick = m.tick();
   if (!g_have_tick || tick != g_last_tick) {
     if (g_have_tick) g_tick_moving = true;

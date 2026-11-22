@@ -100,6 +100,8 @@ def main():
             if status["lc_count"][0] and not a.read_only:
                 raise RuntimeError("another lowcmd publisher present")
             time.sleep(.02)
+        if a.sim and os.environ.get("BLINK_SIM_READY_FILE"):
+            Path(os.environ["BLINK_SIM_READY_FILE"]).touch()
         deadline=time.monotonic()
         while bridge.alive():
             now=time.monotonic()

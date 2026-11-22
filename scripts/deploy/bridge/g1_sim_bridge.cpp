@@ -62,7 +62,7 @@ int main(int argc,char** argv){
  ChannelFactory::Instance()->Init(domain,"lo");
  ChannelSubscriber<LowCmd_> sub("rt/lowcmd");sub.InitChannel(command,0);
  ChannelPublisher<LowState_> pub("rt/lowstate");pub.InitChannel();
- double deadline=mono();
+ double deadline=mono(),last_publish=0.;
  while(!stop){
   SimState s{};lock_sim(&shared->state_mu);s=shared->state;pthread_mutex_unlock(&shared->state_mu);
   if(s.sample_wall>0){
@@ -79,7 +79,12 @@ int main(int argc,char** argv){
    m.imu_state().rpy()[2]=atan2(2*(w*z+x*y),1-2*(y*y+z*z));
    m.wireless_remote()[2]=s.keys&255;m.wireless_remote()[3]=(s.keys>>8)&255;
    m.crc()=Crc32Core((const uint32_t*)&m,(sizeof(m)>>2)-1);
+   double before=mono();
    bool ok=false;try{ok=pub.Write(m);}catch(...){}
+   double after=mono();
+   if(last_publish>0 && after-last_publish>.01)
+    fprintf(stderr,"publish_gap t=%.9f gap_ms=%.3f write_ms=%.3f sample_age_ms=%.3f tick=%llu\n",after,(after-last_publish)*1000,(after-before)*1000,(before-s.sample_wall)*1000,(unsigned long long)s.tick);
+   last_publish=after;
    __atomic_add_fetch(&shared->published,1,__ATOMIC_RELAXED);
    if(!ok)__atomic_add_fetch(&shared->write_fail,1,__ATOMIC_RELAXED);
   }

@@ -3,12 +3,12 @@ import json,os,signal,socket,subprocess,sys,time
 from pathlib import Path
 from .runtime_io import affinity_plan
 from .core import Bundle
-from .session import new_session,atomic_json,DEFAULT_PROFILE
+from .session import new_session,atomic_json,DEFAULT_PROFILE,buttons_address
 from .sim_ipc import SimIPC,BRIDGE
 
 ROOT=Path(__file__).resolve().parents[3]
 def send(path,event):
-    with socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM) as s:s.sendto(json.dumps(event).encode(),str(path/"buttons.sock"))
+    with socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM) as s:s.sendto(json.dumps(event).encode(),buttons_address(path))
 def read(path):
     try:return json.loads(Path(path).read_text())
     except (OSError,ValueError):return {}
@@ -29,7 +29,7 @@ def run(a):
     plan=affinity_plan() if getattr(a,"runtime_affinity","auto")=="auto" else {}
     b=Bundle(a.bundle)
     session=new_session(a.out.resolve())
-    meta=dict(kind="blink_final_sim",domain=a.dds_domain,iface="lo",bundle=str(a.bundle.resolve()),
+    meta=dict(kind="blink_final_sim",coordinated_start=True,domain=a.dds_domain,iface="lo",bundle=str(a.bundle.resolve()),
               bundle_fingerprint=b.fingerprint,unitree_xml=str(a.unitree_xml.resolve()),
               inference_device=getattr(a,"inference_device","cpu"),rt_priority=priority,runtime_affinity=plan,stage=a.stage,sensor_profile=DEFAULT_PROFILE,physics_hz=1000,lowstate_hz=1000,
               lowcmd_hz=500,policy_hz=50,auto=a.auto)
@@ -38,8 +38,8 @@ def run(a):
     print(f"FINAL SIM SESSION: {session}",flush=True)
     print(f"Keyboard: {sys.executable} scripts/deploy/sim_keyboard.py --session {session}",flush=True)
     env=dict(os.environ,PYTHONPATH=str(ROOT/"src"),OMP_NUM_THREADS="1")
-    env.update(OPENBLAS_NUM_THREADS="1",MKL_NUM_THREADS="1")
-    if plan:env.update(BLINK_LOG_CPUS=",".join(map(str,plan["logger"])),BLINK_BRIDGE_CPUS=",".join(map(str,plan["sim_bridge"])))
+    env.update(OPENBLAS_NUM_THREADS="1",MKL_NUM_THREADS="1",BLINK_SIM_READY_FILE=str(session/"runner_ready"))
+    if plan:env.update(BLINK_LOG_CPUS=",".join(map(str,plan["logger"])),BLINK_BRIDGE_CPUS=",".join(map(str,plan.get("bridge",plan["sim_bridge"]))))
     children=[];files=[]
     def spawn(name,cmd):
         f=open(session/(name+".log"),"w");files.append(f)
@@ -57,7 +57,7 @@ def run(a):
     try:
         physics=spawn("physics",[sys.executable,"-u","-m","blinkmimic.deploy.final_physics","--session",str(session)])
         deadline=time.monotonic()+15
-        while not (session/"buttons.sock").exists():
+        while not (session/"buttons_ready").exists():
             if physics.poll() is not None or time.monotonic()>deadline:raise RuntimeError("physics startup failed; see physics.log")
             time.sleep(.05)
         bridge=spawn("sim_bridge",[str(BRIDGE/"g1_sim_bridge"),str(session/"sim.mmap"),str(a.dds_domain)])
@@ -67,6 +67,15 @@ def run(a):
         if a.viewer:
             window=spawn("viewer",[sys.executable,"-u","-m","blinkmimic.deploy.final_view","--session",str(session),
                 "--gl-renderer",a.gl_renderer,"--render-hz",str(a.render_hz)])
+        # Initialize CUDA, DDS and OpenGL before starting the 1 kHz physical clock.
+        # This is automatic setup, not a reset/pause of a running experiment.
+        ready_deadline=time.monotonic()+60
+        while not (session/"runner_ready").exists() or (a.viewer and not (session/"viewer_ready").exists()):
+            if any(p.poll() is not None for p in (physics,bridge,runner)) or (window and window.poll() is not None):
+                raise RuntimeError("simulation initialization failed; see child logs")
+            if time.monotonic()>ready_deadline:raise RuntimeError("simulation initialization timed out")
+            time.sleep(.02)
+        (session/"physics_start").touch()
         atomic_json(session/"processes.json",dict(physics=physics.pid,sim_bridge=bridge.pid,runner=runner.pid,
                                                 viewer=window.pid if window is not None else None))
         while True:

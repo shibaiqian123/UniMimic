@@ -7,6 +7,7 @@ from .graphics import configure_opengl
 from .core import Bundle
 from .sim_ipc import SimIPC
 from .final_session import read
+from .session import buttons_address
 from .viewer_utils import RenderMirror
 from .buttons import WindowInput
 
@@ -33,10 +34,18 @@ def main():
     cam=mujoco.MjvCamera();mujoco.mjv_defaultCamera(cam);cam.distance=3.;cam.azimuth=135.;cam.elevation=-15.
     opt=mujoco.MjvOption();mujoco.mjv_defaultOption(opt)
     scene=mujoco.MjvScene(m,maxgeom=5000);context=mujoco.MjrContext(m,mujoco.mjtFontScale.mjFONTSCALE_150)
+    if meta.get("coordinated_start"):
+        # Force first-draw driver/shader work to finish before the physical clock starts.
+        mujoco.mj_forward(m,d)
+        mujoco.mjv_updateScene(m,d,opt,None,cam,mujoco.mjtCatBit.mjCAT_ALL,scene)
+        w,h=glfw.get_framebuffer_size(win)
+        mujoco.mjr_render(mujoco.MjrRect(0,0,w,h),scene,context)
+        glfw.swap_buffers(win);mujoco.mjr_finish()
+        (a.session/"viewer_ready").touch()
     flags=dict(ghost=True,follow=True,last_key="",mouse=None)
     sock=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)
     def send(event):
-        try:sock.sendto(json.dumps(event).encode(),str(a.session/"buttons.sock"))
+        try:sock.sendto(json.dumps(event).encode(),buttons_address(a.session))
         except OSError:flags["last_key"]="simulation input unavailable"
     window_input=WindowInput(send)
     def key_cb(window,key,scan,action,mods):

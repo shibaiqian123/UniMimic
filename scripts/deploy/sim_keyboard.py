@@ -3,13 +3,14 @@ import argparse,json,socket,sys,termios,tty,time,select
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT/"src"))
 from blinkmimic.deploy.buttons import key_event
+from blinkmimic.deploy.session import buttons_address
 
 def send(session,event):
     session=Path(session)
     meta=json.loads((session/"session.json").read_text())
     if meta.get("kind")!="blink_final_sim" or meta.get("domain") not in (1,2):raise ValueError("simulation session required")
     with socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM) as s:
-        s.sendto(json.dumps(event).encode(),str(session/"buttons.sock"))
+        s.sendto(json.dumps(event).encode(),buttons_address(session))
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument("--session",required=True,type=Path)
     ap.add_argument("--key",choices=["1","2","3","D","B"]);a=ap.parse_args()

@@ -1,5 +1,19 @@
 #include "g1_sim_shm.h"
+// The physics loop must not wait for a viewer or DDS callback holding an IPC mutex.
+static bool try_sim(pthread_mutex_t* mu){
+ int rc=pthread_mutex_trylock(mu);
+ if(rc==EOWNERDEAD){pthread_mutex_consistent(mu);return true;}
+ return rc==0;
+}
 extern "C" {
+int fs_try_write_state(void* h,const void* data){
+ auto* s=(SimShared*)h;if(!try_sim(&s->state_mu))return 0;
+ memcpy(&s->state,data,sizeof(SimState));pthread_mutex_unlock(&s->state_mu);return 1;
+}
+int fs_try_read_cmd(void* h,void* data){
+ auto* s=(SimShared*)h;if(!try_sim(&s->cmd_mu))return 0;
+ memcpy(data,&s->cmd,sizeof(SimCmd));pthread_mutex_unlock(&s->cmd_mu);return 1;
+}
 void* fs_open(const char* path,int create){return open_sim(path,create!=0);}
 void fs_close(void* h){if(h)munmap(h,sizeof(SimShared));}
 int fs_state_size(){return sizeof(SimState);}

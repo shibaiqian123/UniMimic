@@ -8,8 +8,8 @@ from .core import Bundle
 from .sim2sim import Plant
 from .imu_model import ImuModel
 from .buttons import ButtonPulses
-from .sim_ipc import SimIPC,STATE
-from .session import atomic_json
+from .sim_ipc import SimIPC,STATE,CMD
+from .session import atomic_json,buttons_address
 from .runtime_io import RuntimeLog,cpu_list
 
 def main():
@@ -34,7 +34,8 @@ def main():
     imu=ImuModel(p.d.sensordata[sensor["imu_quat"]].copy())
     ipc=SimIPC(a.session/"sim.mmap")
     sock=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)
-    sock.bind(str(a.session/"buttons.sock"));sock.setblocking(False)
+    sock.bind(buttons_address(a.session));sock.setblocking(False)
+    (a.session/"buttons_ready").touch()
     support_anchor=p.d.qpos[p.fq:p.fq+3].copy()
     from .core import rotation
     support_rotation=rotation(p.d.qpos[p.fq+3:p.fq+7])
@@ -47,8 +48,17 @@ def main():
     rec=[];state=np.zeros(1,STATE);row=state[0]
     ui=RuntimeLog(a.session/"physics_events.jsonl",cpu_list(os.environ.get("BLINK_LOG_CPUS")))
     gc_was_enabled=gc.isenabled();gc.collect();gc.disable()
+    setup_started=time.monotonic()
+    if meta.get("coordinated_start"):
+        while not (a.session/"physics_start").exists() and not stop[0]:
+            if time.monotonic()-setup_started>65:raise RuntimeError("supervisor did not start physics")
+            time.sleep(.01)
+    setup_wait=time.monotonic()-setup_started
     wall0=time.monotonic();tick=0;lags=[];display_lags=[];input_log=[];last_ui=0.
-    cmd=ipc.command();last_read=0.;last_toggle=-1.
+    command_buffer=np.zeros(1,CMD);cmd=command_buffer[0];last_read=0.;last_toggle=-1.
+    command_busy=state_busy=0
+    last_publish=None;max_publish_gap=0.
+    previous_step_cpu=time.thread_time()
     try:
         while not stop[0]:
             now=time.monotonic()
@@ -75,7 +85,8 @@ def main():
                 elif typ=="quit":stop[0]=True
             # Robot drivers retain the last received command between 500 Hz messages.
             if now-last_read>=.001:
-                cmd=ipc.command();last_read=now
+                if not ipc.try_command(command_buffer):command_busy+=1
+                last_read=now
             q,dq,gyro,quat=p.state()
             if cmd["seq"] and cmd["mode_machine"]==5 and cmd["mode_pr"]==0:
                 raw=cmd["kp"]*(cmd["q"]-q)+cmd["kd"]*(cmd["dq"]-dq)+cmd["tau"]
@@ -106,7 +117,17 @@ def main():
             row["gyro"]=measured_gyro;row["quat"]=estimated_quat;row["acc"]=p.d.sensordata[sensor["imu_acc"]]
             row["temp"]=temperature;row["motor_fault"]=motor_fault
             row["qpos"]=p.d.qpos;row["qvel"]=p.d.qvel;row["support"]=int(support)
-            ipc.write(state)
+            published=ipc.try_write(state)
+            if not published:state_busy+=1
+            else:
+                if last_publish is not None:
+                    gap=wall-last_publish;max_publish_gap=max(max_publish_gap,gap)
+                    if gap>.01:
+                        ui.write(dict(event="physics_publish_gap",t=wall,tick=tick,
+                            gap_ms=gap*1000,thread_cpu_ms=(time.thread_time()-previous_step_cpu)*1000,
+                            lag_ms=lag*1000,command_busy=command_busy,state_busy=state_busy))
+                last_publish=wall
+                previous_step_cpu=time.thread_time()
             if tick%20==0:
                 rec.append(dict(t=wall,sim_time=float(p.d.time),qpos=p.d.qpos.copy(),qvel=p.d.qvel.copy(),
                     imu_quat=estimated_quat.copy(),imu_gyro=measured_gyro.copy(),imu_truth=truth_quat.copy(),
@@ -127,8 +148,9 @@ def main():
         if rec:np.savez_compressed(a.session/"physics.npz",**{k:np.array([x[k] for x in rec]) for k in rec[0]})
         (a.session/"input.json").write_text(json.dumps(input_log,indent=2))
         lag99=float(np.percentile(np.abs(lags),99)) if lags else None
-        atomic_json(a.session/"physics_report.json",dict(steps=tick,sim_seconds=float(p.d.time),
-            wall_seconds=time.monotonic()-wall0,lag_p99_s=lag99,lag_max_s=max(map(abs,lags)) if lags else None,end_lag_s=lags[-1] if lags else None,
+        atomic_json(a.session/"physics_report.json",dict(setup_wait_s=setup_wait,steps=tick,sim_seconds=float(p.d.time),
+            wall_seconds=time.monotonic()-wall0,lag_p99_s=lag99,
+            ipc_command_busy=command_busy,ipc_state_busy=state_busy,max_publish_gap_s=max_publish_gap,lag_max_s=max(map(abs,lags)) if lags else None,end_lag_s=lags[-1] if lags else None,
             timing_valid=bool(lags and lag99<=.02 and max(map(abs,lags))<=.02 and abs(lags[-1])<=.02),imu=imu.summary(),
             sensor_calibrated=False,temperature_model="synthetic input, not a calibrated thermal model"))
 if __name__=="__main__":main()
