@@ -210,7 +210,8 @@ def latent_log(g,ctx,tb,root,it):
     if g["args"].latent_mode=="continuous32":return
     from .latent import bound,quantize_bounded,HALF
     motion,pi=g["motion"],g["pi"]
-    ids=torch.linspace(0,motion.num_frames-1,min(256,motion.num_frames),device=g["dev"]).long()
+    from blinkmimic.probe_batches import diagnostic_frames
+    ids=diagnostic_frames(motion.num_frames,256,g["dev"])
     ids=ids[ctx.rank::ctx.world]
     from .policy_inputs import diagnostic_orientation
     goals=motion.goal(ids,g["K"])

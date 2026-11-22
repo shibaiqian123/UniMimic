@@ -65,3 +65,29 @@ def test_inadequate_candidates_leaves_no_partial_output(tmp_path):
     with pytest.raises(ValueError,match="requested"):
         builder.build(*args,out,counts={"train":10000,"val":1,"test":1})
     assert not out.exists()
+
+
+def test_full_expansion_keeps_frozen_holdouts_and_mirrors(tmp_path,monkeypatch):
+    import hashlib
+    import shutil
+    args=fixture(tmp_path)
+    metadata,source,revision,seen=args
+    target=tmp_path/"raw/metadata/seed_metadata_v004.csv"
+    target.parent.mkdir(parents=True)
+    shutil.copyfile(metadata,target)
+    frozen=tmp_path/"subsets/bones1000_v1_s0"
+    builder.build(*args,frozen,counts={"train":5,"val":3,"test":3})
+    full_spec=importlib.util.spec_from_file_location("bones_full",Path(__file__).resolve().parents[1]/"tools/build_bones_full.py")
+    full=importlib.util.module_from_spec(full_spec);full_spec.loader.exec_module(full)
+    out=tmp_path/"subsets/full"
+    monkeypatch.setattr("sys.argv",["build_bones_full","--root",str(tmp_path),"--out",str(out)])
+    full.main()
+    assignment=json.loads((frozen/"group_assignments.json").read_text())
+    rows=[json.loads(l) for l in (out/"train.catalog.jsonl").read_text().splitlines()]
+    assert len(rows)==4*sum(s=="train" for s in assignment.values())
+    assert any(r["metadata"]["is_mirror"]=="True" for r in rows)
+    assert all(assignment[r["split_group_id"]]=="train" for r in rows)
+    assert len(list((out/"train").glob("*.csv")))==len(rows)
+    for split in ("val","test"):
+        assert (out/split).resolve()==(frozen/split).resolve()
+        assert (out/(split+".jsonl")).read_bytes()==(frozen/(split+".jsonl")).read_bytes()

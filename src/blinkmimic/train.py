@@ -17,6 +17,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--robot", type=str, default="g1", help="robot package under blinkmimic/ (g1)")
+parser.add_argument("--motion-compact", action="store_true", help="store root/joint references only; compute body FK on sampled frames")
+parser.add_argument("--eprobe-max-envs", type=int, default=0, help="0: all probes; otherwise rotate fixed-size probe batches across sweeps")
 parser.add_argument("--num_envs", type=int, default=4096)
 parser.add_argument("--iterations", type=int, default=320_000)
 parser.add_argument("--buffer_steps", type=int, default=1000)
@@ -193,7 +195,10 @@ if not DIST or DIST_CTX.main:
 robot = get_robot(args.robot)
 J = robot.num_joints
 kin = Kinematics(robot, dev)
-motion = MotionLib.from_dir(args.motion_dir or robot.motion_dir, robot, kin, dev)
+motion = MotionLib.from_dir(args.motion_dir or robot.motion_dir, robot, kin, dev, compact=args.motion_compact)
+if args.motion_compact:
+    print(f"Compact references: {len(motion.names)} clips, {motion.num_frames} frames, "
+          f"{torch.cuda.memory_allocated()/2**30:.2f} GiB CUDA tensors before network/replay allocation", flush=True)
 layout = XiLayout(robot, dev)
 normalize_xi = layout.normalize
 mdp = MDP(kin, motion, torch.tensor(robot.default_joint_pos_list(), device=dev), layout.dim, robot.sensing)
@@ -726,9 +731,12 @@ else:
 
 EPROBE = args.eprobe_share > 0 and (not DIST or DIST_CTX.main)  # --eprobe_share; off: code path and random stream unchanged
 if EPROBE:
-    EP_TILE = torch.cat([torch.arange(int(motion.clip_start[c]), int(motion.clip_end[c]) - 1, args.eprobe_tile)
-                         for c in range(len(motion.names))]).to(dev)  # fmt: skip
-    P_EP = len(EP_TILE)
+    from blinkmimic.probe_batches import probe_tiles, select_probe_batch
+    EP_TILE_ALL = probe_tiles(motion.clip_start, motion.clip_end, args.eprobe_tile)
+    if args.eprobe_max_envs < 0:
+        raise ValueError("--eprobe-max-envs must be nonnegative")
+    P_EP = min(args.eprobe_max_envs or len(EP_TILE_ALL), len(EP_TILE_ALL))
+    EP_TILE = EP_TILE_ALL[:P_EP].clone()
     assert pi_avg is not None, "--eprobe_share sweeps the EMA policy: needs --pi_ema"
     assert not args.eprobe_async or args.eprobe_graph, "--eprobe_async needs --eprobe_graph"
     EP_PI = copy.deepcopy(pi_avg.module) if args.eprobe_async else pi_avg.module  # sweep policy (async: a snapshot)
@@ -739,7 +747,7 @@ if EPROBE:
     # weight back over the window before it
     _nxt = torch.arange(motion.num_bins, device=dev) + 1
     EP_NEXT = torch.where((_nxt < motion.num_bins) & (motion.bin_clip[_nxt.clamp(max=motion.num_bins - 1)] == motion.bin_clip), _nxt, _nxt - 1)
-    print(f"--eprobe: {len(EP_TILE)} probe worlds (tiles of {args.eprobe_tile} frames)", flush=True)
+    print(f"--eprobe: {P_EP}/{len(EP_TILE_ALL)} probe worlds per sweep (tiles of {args.eprobe_tile} frames)", flush=True)
 
 
 @torch.no_grad()
@@ -841,6 +849,9 @@ def eprobe_burst(it):
     the --eprobe_win bins before each failure."""
     m, P = motion, P_EP
     t0 = time.time()
+    if P_EP < len(EP_TILE_ALL):
+        sweep = max(0, (it - args.eprobe_start) // args.eprobe_every)
+        EP_TILE.copy_(select_probe_batch(EP_TILE_ALL, P_EP, sweep))
     cid = m.clip_id[EP_TILE]
     lead = int(torch.randint(args.eprobe_lead_min, args.eprobe_lead_max + 1, (1,)))
     f0 = torch.maximum(EP_TILE - lead, m.clip_start[cid])
@@ -1016,7 +1027,8 @@ for it in range(start_it, args.iterations):
         if args.latent_mode != "continuous32":
             from blinkmimic.latent import statistics
             with torch.no_grad():
-                fsq_frames = torch.linspace(0, motion.num_frames-1, min(256, motion.num_frames), device=dev).long()
+                from blinkmimic.probe_batches import diagnostic_frames
+                fsq_frames = diagnostic_frames(motion.num_frames, 256, dev)
                 fsq_goal = motion.goal(fsq_frames,K)
                 latent_stats = statistics(pi,fsq_goal,diagnostic_orientation(pi,motion,fsq_frames))
             with open(os.path.join(args.log_dir, "latent_metrics.jsonl"), "a") as latent_log:

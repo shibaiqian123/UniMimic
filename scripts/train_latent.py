@@ -29,7 +29,11 @@ def main():
         ap.error("use wrapper options for mode/data/log/seed/resume; reference skip is forbidden")
     paths=sorted(a.motion_dir.resolve().glob("*.csv"))
     if not paths:ap.error(f"no CSV clips found in {a.motion_dir}")
-    files=[dict(name=p.name,sha256=hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths]
+    files=[]
+    for i,p in enumerate(paths,1):
+        files.append(dict(name=p.name,sha256=hashlib.sha256(p.read_bytes()).hexdigest()))
+        if len(paths)>1000 and (i%2000==0 or i==len(paths)):
+            print(f"Fingerprinting motion files: {i}/{len(paths)}",flush=True)
     prefix=([sys.executable,"-u","-m","blinkmimic.train"] if a.gpus==1 else
             [sys.executable,"-u","-m","torch.distributed.run","--standalone","--nnodes=1","--nproc-per-node=2","-m","blinkmimic.train"])
     cmd=[*prefix,*flags,
