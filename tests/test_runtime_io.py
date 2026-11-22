@@ -52,4 +52,33 @@ def test_affinity_separates_dds_endpoints_when_cores_available():
         for i,cpus in enumerate(critical):
             assert not cpus.intersection(plan["viewer"])
             for other in critical[i+1:]:assert not cpus.intersection(other)
-        assert len(plan["sim_bridge"])==2
+        assert len(plan["sim_bridge"])>=2
+        assert len(plan["bridge"])>=2
+        assert len(plan["runner"])==2
+
+
+def test_affinity_cpu_pools_and_smt_exclusion(monkeypatch):
+    import re
+    from pathlib import Path
+    import blinkmimic.deploy.runtime_io as runtime
+    original=Path.read_text
+    for count in (4, 8, 12, 64):
+        monkeypatch.setattr(runtime.os, "sched_getaffinity", lambda pid, n=count: set(range(n*2)))
+        def topology(path, *args, n=count, **kwargs):
+            match=re.search(r"/cpu(\d+)/topology/(physical_package_id|core_id)$", str(path))
+            if not match:
+                return original(path, *args, **kwargs)
+            return "0" if match[2]=="physical_package_id" else str(int(match[1]) % n)
+        monkeypatch.setattr(Path, "read_text", topology)
+        plan=runtime.affinity_plan()
+        roles=("physics","runner","sim_bridge")+(("bridge",) if "bridge" in plan else ())
+        used=set()
+        for role in roles:
+            physical={c % count for c in plan[role]}
+            assert not used & physical
+            used |= physical
+        assert not used & {c % count for c in plan["viewer"]}
+        if count>=8:
+            assert len(plan["sim_bridge"])==min(8,(count-4)//2)
+            assert len(plan["bridge"])==len(plan["sim_bridge"])
+            assert len(plan["runner"])==2

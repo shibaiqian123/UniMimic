@@ -9,6 +9,10 @@
 #include <stdio.h>
 #include <cmath>
 #include <string>
+#include <sys/prctl.h>
+#include <sched.h>
+#include <cstdlib>
+static unsigned long long rqwait(){FILE* f=fopen("/proc/thread-self/schedstat","r");unsigned long long a=0,b=0,c=0;if(f){if(fscanf(f,"%llu %llu %llu",&a,&b,&c)!=3)b=0;fclose(f);}return b;}
 using namespace unitree::robot;
 using unitree_hg::msg::dds_::LowCmd_;
 using unitree_hg::msg::dds_::LowState_;
@@ -63,8 +67,14 @@ int main(int argc,char** argv){
  ChannelSubscriber<LowCmd_> sub("rt/lowcmd");sub.InitChannel(command,0);
  ChannelPublisher<LowState_> pub("rt/lowstate");pub.InitChannel();
  double deadline=mono(),last_publish=0.;
+ double last_loop_cpu=0.;unsigned long long before_wait=0;
+ const bool trace_sched=getenv("BLINK_DDS_TRACE_SCHED")!=nullptr;
+ fprintf(stderr,"publisher scheduler=%d timerslack_ns=%d\n",sched_getscheduler(0),prctl(PR_GET_TIMERSLACK));
  while(!stop){
+  double loop_start=mono();timespec cpu_ts;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&cpu_ts);
+  double loop_cpu=cpu_ts.tv_sec+cpu_ts.tv_nsec*1e-9;
   SimState s{};lock_sim(&shared->state_mu);s=shared->state;pthread_mutex_unlock(&shared->state_mu);
+  double read_end=mono();
   if(s.sample_wall>0){
    LowState_ m{};m.mode_machine()=5;m.mode_pr()=0;m.tick()=uint32_t(s.tick);
    for(int i=0;i<29;i++){
@@ -83,13 +93,15 @@ int main(int argc,char** argv){
    bool ok=false;try{ok=pub.Write(m);}catch(...){}
    double after=mono();
    if(last_publish>0 && after-last_publish>.01)
-    fprintf(stderr,"publish_gap t=%.9f gap_ms=%.3f write_ms=%.3f sample_age_ms=%.3f tick=%llu\n",after,(after-last_publish)*1000,(after-before)*1000,(before-s.sample_wall)*1000,(unsigned long long)s.tick);
+    fprintf(stderr,"publish_gap t=%.9f gap_ms=%.3f write_ms=%.3f sample_age_ms=%.3f tick=%llu wake_late_ms=%.3f read_ms=%.3f build_ms=%.3f loop_cpu_ms=%.3f runqueue_wait_ms=%.3f\n",after,(after-last_publish)*1000,(after-before)*1000,(before-s.sample_wall)*1000,(unsigned long long)s.tick,(loop_start-deadline)*1000,(read_end-loop_start)*1000,(before-read_end)*1000,(loop_cpu-last_loop_cpu)*1000,trace_sched ? (rqwait()-before_wait)/1e6 : -1.);
    last_publish=after;
    __atomic_add_fetch(&shared->published,1,__ATOMIC_RELAXED);
    if(!ok)__atomic_add_fetch(&shared->write_fail,1,__ATOMIC_RELAXED);
   }
+  last_loop_cpu=loop_cpu;
   deadline+=.001;double now=mono();
   if(deadline<now-.01)deadline=now;
+  if(trace_sched)before_wait=rqwait();
   if(deadline>now){timespec ts{time_t(deadline),long((deadline-time_t(deadline))*1e9)};clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&ts,nullptr);}
  }
  munmap(shared,sizeof(*shared));return 0;

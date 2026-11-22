@@ -70,13 +70,20 @@ def affinity_plan():
         groups.setdefault(key,[]).append(cpu)
     cores=list(groups.values())
     if len(cores)<4:raise ValueError("auto affinity requires four physical cores; use --runtime-affinity none")
-    if len(cores)>=6:
-        selected=cores[-6:]
-        # DDS publisher and robot-side subscriber/transmitter have their own workers.
-        # Do not serialize both endpoints and all middleware threads on one CPU.
-        critical={v for i,g in enumerate(selected) if i!=4 for v in g}
-        return dict(physics=[selected[0][0]],sim_bridge=[selected[1][0],selected[2][0]],
-                    runner=[selected[3][0]],logger=[selected[4][0]],bridge=[selected[5][0]],
+    if len(cores)>=8:
+        # A DDS participant creates multiple middleware workers. Restricting the
+        # publisher to two CPUs and receiver to one caused 30-80 ms runqueue waits
+        # under desktop/viewer load despite idle CPUs elsewhere.
+        # Give each DDS endpoint a disjoint physical-core pool, and let the
+        # controller migrate between two cores. Exclude their SMT siblings from
+        # the viewer; affinity is placement, not an OS reservation.
+        pool=min(8,(len(cores)-4)//2)
+        selected=cores[-(4+2*pool):]
+        critical={cpu for i,g in enumerate(selected) if i!=3 for cpu in g}
+        return dict(physics=[selected[0][0]],runner=[g[0] for g in selected[1:3]],
+                    logger=[selected[3][0]],
+                    sim_bridge=[g[0] for g in selected[4:4+pool]],
+                    bridge=[g[0] for g in selected[4+pool:]],
                     viewer=[c for c in allowed if c not in critical])
     selected=cores[-4:]
     critical={v for group in selected[:3] for v in group}
