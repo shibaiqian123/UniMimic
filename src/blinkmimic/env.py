@@ -213,7 +213,11 @@ class TrackingSim:
             probs = (1 - self.focus_share) * probs + self.focus_share * self.focus_q
         bins = torch.multinomial(probs, n, replacement=True)
         start = m.bin_start[bins]
-        end = torch.minimum(start + 50, m.clip_end[m.bin_clip[bins]])  # keep >= 1 step before the clip end
+        end = torch.minimum(start + 50, m.clip_end[m.bin_clip[bins]])  # exclusive reset bound
+        # A clip with length 50*k+1 has a final bin containing only its terminal
+        # frame. Reset to the penultimate frame instead, so step_core's f+1 stays
+        # inside this clip. Keep bin IDs/shapes unchanged for sampler checkpoints.
+        start = torch.minimum(start, end - 1)
         f = start + (torch.rand(n, device=self.device) * (end - start).float()).long()
         return f, bins
 
