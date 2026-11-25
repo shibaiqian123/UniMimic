@@ -72,3 +72,22 @@ The final sim2sim sensor estimator in src/blinkmimic/deploy/imu_model.py is adap
 
 ## Finite scalar quantization
 The scalar bounding/rounding formula in src/blinkmimic/latent.py follows lucidrains/vector-quantize-pytorch 1.27.15 (MIT; licenses/vector-quantize-pytorch-MIT.txt). SONIC configuration reference: NVlabs/GR00T-WholeBodyControl gear_sonic/config/actor_critic/universal_token/all_mlp_v1.yaml (2 tokens, 32 components, 32 levels). No SONIC model weights are copied. Reference package is test-only and not a deployment dependency.
+
+
+## SONIC multimodal feature and auxiliary-loss reference
+
+The omni modules independently implement feature formulas and standard non-compliance
+loss semantics described by NVIDIA GR00T-WholeBodyControl, commit
+2f07b35b3f3b9053b1f4fd2adeaf56b6bce32366:
+https://github.com/NVlabs/GR00T-WholeBodyControl/tree/2f07b35b3f3b9053b1f4fd2adeaf56b6bce32366
+
+Reference files: gear_sonic/envs/manager_env/mdp/{commands,observations}.py,
+gear_sonic/isaac_utils/rotations.py, gear_sonic/trl/losses/token_losses.py,
+gear_sonic/trl/modules/universal_token_modules.py, and sonic_release.yaml.
+
+Upstream source code: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+Upstream source notice reproduced in licenses/SONIC-source-NOTICE.txt.
+No upstream pretrained weights are included. BlinkMimic adaptations retain its
+world-model optimizer, RobotSpec joint order, independent running normalizers,
+and its action-decoder architecture; these are not an exact SONIC PPO reproduction.

@@ -36,7 +36,7 @@ def resample_motion(p, quat, j, src_fps):
 
 
 class MotionLib:
-    def __init__(self, files: list[str], kin: Kinematics, device: str, load_motion: Callable[[str], MotionArrays], *, compact: bool = False):
+    def __init__(self, files: list[str], kin: Kinematics, device: str, load_motion: Callable[[str], MotionArrays], *, compact: bool = False, frame_limits=None):
         self.device = device
         self.compact = compact
         self.kin = kin
@@ -46,6 +46,10 @@ class MotionLib:
         for file_index, f in enumerate(files):
             p, quat, j, src_fps = load_motion(f)
             p, quat, j = resample_motion(p, quat, j, src_fps)
+            if frame_limits is not None:
+                limit=int(frame_limits[file_index])
+                if limit<2 or limit>len(p):raise ValueError("Invalid shared motion length")
+                p,quat,j=p[:limit],quat[:limit],j[:limit]
             n = len(p)
             ps.append(p), qs.append(quat), js.append(j)
             lens.append(n)
