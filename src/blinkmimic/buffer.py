@@ -113,5 +113,6 @@ class ReplayBuffer:
         henv = env.unsqueeze(-1).expand_as(hrows)
         stateful = "o" in self.data
         start = {k: self.data[k][row, env] for k in ("s", "a_prev", "xi", "f") + (("obs_state",) if stateful else ())}
+        if "modality" in self.data:start["modality"]=self.data["modality"][row,env]
         hist_d = {k: self.data[k][hrows, henv] for k in ("s", "a_prev", "xi", "f") + (("o",) if stateful else ())}
         return start, hist_d

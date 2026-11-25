@@ -10,6 +10,7 @@ class Collector:
         self.g,self.ctx,self.a=g,ctx,g["args"]
         self.env,self.pi,self.wm,self.motion=g["env"],g["pi"],g["wm"],g["motion"]
         self.buffer=g["buffer"]
+        self.omni=g.get("omni_runtime")
         self.env.use_static_focus()
         self.env.distributed_sampling=True
         self.f,self.ep,self.prev=self.env.f,self.env.ep_step,self.env.a_prev
@@ -34,9 +35,13 @@ class Collector:
 
     @torch.no_grad()
     def _physics(self):
-        a=policy_action(self.pi,self.hist,self.goal,self.orientation)
+        a=(self.omni.collect_action(self.hist) if self.omni else
+           policy_action(self.pi,self.hist,self.goal,self.orientation))
         a=(a+self.a.action_noise*torch.randn_like(a)).clamp(-20,20)
         out=self.env.step_core(a)
+        if self.omni:
+            out["modality"]=self.omni.modality
+            self.omni.record(out)
         self.buffer.add_device(out)
         wmdata=self.g["wm_norm_data_c"](unflatten_state(out["s"]),unflatten_state(out["s1"]),
                                       out["a"],out["a_prev"],out["xi"])
@@ -58,12 +63,20 @@ class Collector:
     @torch.no_grad()
     def _reset(self):
         self.env.reset_masked(self.done)
+        if self.omni:self.omni.reset_modalities(self.done)
         return self.done
 
     @torch.no_grad()
     def step(self):
+        if self.omni:self.omni.prepare_collection()
         o=self.observe()
-        self.ctx.moments([self.pi.obs_norm,self.pi.goal_norm],normalizer_inputs(self.pi,o,self.goal,self.orientation))
+        if self.omni:
+            from .omni import MODALITIES
+            inputs=self.omni.collection_inputs()
+            self.ctx.moments([self.pi.obs_norm]+[self.pi.input_norms[m] for m in MODALITIES],
+                             [o[...,:93]]+[inputs[m] for m in MODALITIES])
+        else:
+            self.ctx.moments([self.pi.obs_norm,self.pi.goal_norm],normalizer_inputs(self.pi,o,self.goal,self.orientation))
         wmdata,totals,stats,done=self.physics()
         self.buffer.advance_host()
         self.ctx.moments([self.wm.in_norm,self.wm.out_norm,self.wm.inc_norm],wmdata)
@@ -80,6 +93,7 @@ class Updates:
         self.g,self.ctx,self.a=g,ctx,g["args"]
         self.wm,self.pi,self.v=g["wm"],g["pi"],g["critic"]
         self.cx=self.cy=None
+        self.omni=g.get("omni_runtime")
         self.wphase=LocalGraph(self._world,ctx,self.a.cuda_graph)
         self.pphase=LocalGraph(self._policy,ctx,self.a.cuda_graph)
         self.cphase=LocalGraph(self._critic,ctx,self.a.cuda_graph)
@@ -103,7 +117,7 @@ class Updates:
 
     def _policy(self):
         g,a=self.g,self.a
-        s,h=g["sample_valid_starts"](a.pi_batch)
+        s,h=self.omni.starts if self.omni else g["sample_valid_starts"](a.pi_batch)
         S=unflatten_state(s["s"]);S0=S
         xi,f,previous=s["xi"],s["f"],s["a_prev"];xi_n=g["normalize_xi"](xi)
         with torch.no_grad():
@@ -111,9 +125,12 @@ class Updates:
             history=g["mdp"].add_noise(history)
         goal0=goal=g["motion"].goal(f,a.goal_frames)
         states,actions,prevs,frames,goals=[],[],[],[],[]
-        for _ in range(a.horizon):
+        for t in range(a.horizon):
             prevs.append(previous)
-            S,previous,history,f,goal=g["imag_step"](S,history,previous,f,xi,xi_n,goal)
+            if self.omni:
+                S,previous,history,f,goal=self.omni.imag_step(S,history,previous,f,xi,xi_n,t,s["modality"])
+            else:
+                S,previous,history,f,goal=g["imag_step"](S,history,previous,f,xi,xi_n,goal)
             states.append(S);actions.append(previous);frames.append(f);goals.append(goal)
         flat=lambda xs:torch.stack(xs).flatten(0,1)
         all_states=tuple(flat([s0[i] for s0 in states]) for i in range(6))
@@ -122,6 +139,13 @@ class Updates:
         boot=self.v(g["critic_input_c"](S,f,xi_n,goal))
         J,ct,c=actor_objective(r,d,boot,a.gamma,loop_cumprod=a.cuda_graph)
         loss=-J.mean()
+        if self.omni:
+            from .omni import auxiliary_total
+            inputs=self.omni.imagination_inputs(0,S0[1])
+            terms=self.pi.auxiliary(inputs)
+            numerator,count=auxiliary_total(terms)
+            loss=loss+numerator/count.clamp_min(1)
+            self.omni.aux.copy_(torch.stack([v.mean().detach() for v in terms.values()]))
         zero_grads(self.pi);loss.backward()
         with torch.no_grad():
             sc=tuple(torch.cat((S0[i][None],torch.stack([s0[i].detach() for s0 in states])),0).flatten(0,1) for i in range(6))
@@ -138,6 +162,7 @@ class Updates:
 
     def policy(self):
         g,a=self.g,self.a
+        if self.omni:self.omni.prepare_imagination()
         g["set_requires_grad"](self.wm,False);g["set_requires_grad"](self.v,False)
         try:pl,ir,surv,X,r,d=self.pphase()
         finally:

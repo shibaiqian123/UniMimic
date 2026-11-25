@@ -140,8 +140,28 @@ parser.add_argument("--latent-mode", "--latent_mode", dest="latent_mode",
 parser.add_argument("--dist-audit", action="store_true", help="verify identical model/buffer/optimizer state across ranks at log intervals")
 parser.add_argument("--dist-no-graphs", action="store_true", help="explicit two-GPU eager diagnostic; not the default")
 parser.add_argument("--observation-mode",choices=["legacy99","proprio93"],default="legacy99")
+parser.add_argument("--omni-index", default=None, help="Paired omni reference index.json")
+parser.add_argument("--omni-data-root", default=None)
 args = parser.parse_args()
-if args.dist_no_graphs and not DIST:
+OMNI = args.omni_index is not None
+if OMNI:
+    if args.latent_mode!="fsq64" or args.observation_mode!="proprio93" or args.pi_ref_skip:
+        parser.error("omni requires fsq64/proprio93 without pi_ref_skip")
+    if args.hist!=10 or args.goal_frames!=10 or args.robot!="g1":
+        parser.error("omni requires G1, history=10 and goal_frames=10")
+    if not args.omni_data_root:
+        parser.error("omni requires --omni-data-root")
+    if args.eprobe_share>0:
+        parser.error("omni uses explicit per-modality evaluation; set --eprobe_share 0")
+    from blinkmimic.omni import CONTRACT
+    import hashlib
+    args.omni_contract = CONTRACT
+    args.omni_aux_weights = {"g1_recon":.01,"g1_smpl_latent":1.,"g1_teleop_latent":1.,
+                             "teleop_smpl_latent":1.,"reencoded_smpl_g1_latent":1.}
+    args.omni_encoder_hidden = [2048,1024,512,512]
+    args.omni_index_sha256 = hashlib.sha256(open(args.omni_index,"rb").read()).hexdigest()
+
+if args.dist_no_graphs and not (DIST or OMNI):
     parser.error("--dist-no-graphs requires torchrun with two GPUs")
 if args.dist_no_graphs:
     args.cuda_graph = args.collect_graph = args.graph_early = args.reset_masked = False
@@ -167,6 +187,12 @@ if DIST:
     from blinkmimic.distributed import init, split_global
     DIST_CTX = init()
     GLOBAL_ARGS = split_global(args, DIST_CTX.world)
+elif OMNI:
+    from blinkmimic.distributed import Distributed, split_global
+    DIST_CTX = Distributed()
+    GLOBAL_ARGS = split_global(args, 1)
+    DIST = True  # shared staged runner, without a process group or communication
+
 
 from blinkmimic.buffer import ReplayBuffer
 from blinkmimic.dr import XiLayout
@@ -195,7 +221,13 @@ if not DIST or DIST_CTX.main:
 robot = get_robot(args.robot)
 J = robot.num_joints
 kin = Kinematics(robot, dev)
-motion = MotionLib.from_dir(args.motion_dir or robot.motion_dir, robot, kin, dev, compact=args.motion_compact)
+if OMNI:
+    from blinkmimic.omni_data import ReferenceStore
+    from blinkmimic.omni_runtime import load_motion
+    omni_store = ReferenceStore(args.omni_index, robot.joint_names)
+    motion = load_motion(omni_store, args.omni_data_root, robot, kin, dev)
+else:
+    motion = MotionLib.from_dir(args.motion_dir or robot.motion_dir, robot, kin, dev, compact=args.motion_compact)
 if args.motion_compact:
     print(f"Compact references: {len(motion.names)} clips, {motion.num_frames} frames, "
           f"{torch.cuda.memory_allocated()/2**30:.2f} GiB CUDA tensors before network/replay allocation", flush=True)
@@ -213,8 +245,12 @@ rotations.ELEMENTWISE = args.fused_rot
 
 wm = WorldModel(J, layout.dim, use_prev_action=robot.has_action_delay, hidden=widths(args.wm_hidden),
                 structured=args.wm_structured, dt=CONTROL_DT).to(dev)  # fmt: skip
-pi = Policy(mdp.obs_dim, GOAL_DIM, J, hist=Hh, enc_hidden=widths(args.enc_hidden), dec_hidden=widths(args.dec_hidden),
-            **policy_kwargs(vars(args), robot)).to(dev)
+if OMNI:
+    from blinkmimic.omni import OmniPolicy
+    pi = OmniPolicy(dec_hidden=widths(args.dec_hidden)).to(dev)
+else:
+    pi = Policy(mdp.obs_dim, GOAL_DIM, J, hist=Hh, enc_hidden=widths(args.enc_hidden), dec_hidden=widths(args.dec_hidden),
+                **policy_kwargs(vars(args), robot)).to(dev)
 critic = Critic(CRITIC_IN).to(dev)
 GRAPH = args.cuda_graph
 if GRAPH:
@@ -233,7 +269,7 @@ if args.wm_opt == "muon":
 else:
     opt_wm = torch.optim.Adam(wm.parameters(), **adam_kw())
 if args.pi_opt == "muon":
-    opt_pi = MuonAdam(pi, [pi.enc, pi.dec], lr=args.lr, betas=(args.pi_beta1, 0.95), fused=args.fused_adam, capturable=GRAPH)
+    opt_pi = MuonAdam(pi, ([*pi.encoders.values(),pi.dec,pi.reconstruction] if OMNI else [pi.enc, pi.dec]), lr=args.lr, betas=(args.pi_beta1, 0.95), fused=args.fused_adam, capturable=GRAPH)
 else:
     opt_pi = torch.optim.Adam(pi.parameters(), betas=(args.pi_beta1, 0.95), **adam_kw())
 NONFINITE = torch.zeros((), dtype=torch.long, device=dev)  # --no_sync: skipped non-finite policy updates
@@ -590,6 +626,10 @@ if INIT_BINS is not None:  # --resume: the checkpoint's reset-sampler statistics
 buffer = ReplayBuffer(args.buffer_steps, args.num_envs, dev, J, layout.dim,
                       mdp.obs_dim if pipe.stateful else None, pipe.state_dim if pipe.stateful else None)  # fmt: skip
 obs_hist = torch.zeros(args.num_envs, Hh, mdp.obs_dim, device=dev)
+if OMNI:
+    from blinkmimic.omni_runtime import OmniRuntime
+    omni_runtime = OmniRuntime(globals(),omni_store)
+
 
 
 CG = {"calls": 0}  # --collect_graph: static tensors and the graph

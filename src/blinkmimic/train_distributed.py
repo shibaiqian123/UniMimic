@@ -207,6 +207,9 @@ def run(g):
 
 @torch.no_grad()
 def latent_log(g,ctx,tb,root,it):
+    if g.get("omni_runtime") is not None:
+        g["omni_runtime"].log(ctx,tb,root,it)
+        return
     if g["args"].latent_mode=="continuous32":return
     from .latent import bound,quantize_bounded,HALF
     motion,pi=g["motion"],g["pi"]

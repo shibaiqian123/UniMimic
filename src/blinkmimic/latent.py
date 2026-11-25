@@ -45,6 +45,9 @@ def validate_args(args):
     return expected
 
 def check_resume(saved, current):
+    for key in ("omni_contract","omni_index_sha256"):
+        if saved.get(key)!=current.get(key):
+            raise ValueError("resume omni architecture/data mismatch: "+key)
     from .policy_inputs import validate_args as validate_observation
     if validate_observation(saved)!=validate_observation(current):
         raise ValueError("resume observation architecture mismatch; start a separate run")
