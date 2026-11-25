@@ -7,7 +7,7 @@ Source work is on 229, branch `omni`. Sync commits with Git before running the c
 Reference: NVIDIA GR00T-WholeBodyControl, commit `2f07b35b3f3b9053b1f4fd2adeaf56b6bce32366`, `sonic_release`; Apache-2.0 source attribution is in THIRD_PARTY_NOTICES.md. Relevant files are motion command configuration, `commands.py`, `observations.py`, the multimodal policy and standard auxiliary losses. No NVIDIA weights or compliance losses are included.
 
 * Motion: 640 features, ten frames at offsets **0,5,...45**, 50 Hz. Official packing concatenates flattened q and qd, reshapes to ten 58D blocks, appends the corresponding relative 6D rotation, then flattens.
-* SMPL: 840 features, offsets **0,...9**. Each frame contains 24 local joints (72), relative root orientation (6), and wrist reference joints (6). Root conversion is `Rx(pi/2) @ Exp(root_axis_angle) @ R(wxyz=[.5,.5,.5,.5]).T`. As in the release, stored `smpl_joints` are rotated into this local frame without an additional translation subtraction. This convention still requires validation on actual paired SMPL files before a large run.
+* SMPL: 840 features, offsets **0,...9**. Each frame contains 24 local joints (72), relative root orientation (6), and wrist reference joints (6). Root conversion is `Rx(pi/2) @ Exp(root_axis_angle) @ R(wxyz=[.5,.5,.5,.5]).T`. As in the release, stored `smpl_joints` are rotated into this local frame without an additional translation subtraction. This convention was checked on the authorized 20 actual paired samples (see validation evidence below).
 * Teleop: 273 features: ten frames of twelve leg positions and velocities (240), current left/right hand and virtual head positions (9), local 6D orientations (18), and current reference pelvis orientation relative to the robot (6). It is not a three-point-only VR controller: lower-body reference remains required.
 * Joint arrays follow BlinkMimic RobotSpec names/order, not IsaacLab's storage order. Wrist order is left/right roll, left/right pitch, left/right yaw. Threepoint caches preserve their original source commit and robot XML fingerprint.
 * Future windows include the current frame, clamp at the paired shared endpoint, and never enter another clip. This differs from the old single-modality `f+1...f+10` interface, which is preserved.
@@ -124,5 +124,40 @@ Repeat with `motion` and `smpl`. Keyboard 1 prepare / 2 standby / 3 play / B sup
 * A smoke checkpoint exported with maximum action error about `4.3e-8`. Each modality passed offline DeployCore inference; Teleop evaluation entry ran on two synthetic paired clips. These are interface checks only.
 * Existing v1/v2/v3 deployed bundles were compared against the pre-change runtime on fixed inputs; action differences were zero.
 * Two-rank CPU/Gloo test covered global normalization, unequal masked-loss gradients, and coordinated nonfinite skip. It does not establish two-A100 CUDA/NCCL throughput or end-to-end training stability.
-* Actual SMPL sample validation on 229 awaits authorized access/transfer; no claim that synthetic tests validate source data coordinates. Full preprocessing, full-data short training, long-run quality and complete trained-policy final simulation remain pending.
+* The authorized 20 actual SMPL samples were copied from 32 to 229 with matching manifest SHA256. All are training-split samples: 10 original and 10 mirrored clips across walking, turning, jogging, squatting and gestures. Their 5,756 shared frames were converted and independently checked using SciPy/NumPy: maximum feature error `3.81e-7` (threshold `1e-4`). Each raw pelvis position is constant over its clip; local left/right hip separation has the expected sign. G1-versus-SMPL root orientation differences are retargeting diagnostics, not formula error. Full preprocessing, full-data short training, long-run quality and complete trained-policy final simulation remain pending.
 * No real VR calibration, online lower-body planner, VLA, robot run or hardware validation was performed. No startup certification gates were added.
+
+## Repeat actual-sample feature verification on 229
+
+```bash
+cd /home/cqu023/blinkmimic
+OMP_NUM_THREADS=1 PYTHONPATH=src .venv/bin/python tools/validate_omni_samples.py \
+  --manifest data/threepoint_samples/manifest.jsonl \
+  --data-root data/threepoint_samples --index results/omni_real20/index.json \
+  --out results/omni_real20/validation.json
+```
+
+The validation reads source SMPL and cached references, compares every shared frame and both future windows against independent formulas, and records per-clip diagnostics. It does not fit or reconstruct a new SMPL body model and does not claim the human and retargeted robot skeletons coincide.
+
+## Actual-data short training and export follow-up
+
+Authorized sample access is complete; the earlier transfer blocker is resolved. Exactly 20 SMPL files (3,973,512 bytes) were copied to `data/threepoint_samples/smpl_extracted/` and matched manifest hashes. No source on 32 was edited and no held-out clip was used in this smoke run.
+
+`logs/omni_real20_smoke_bf16` trained fresh for 6 iterations, saved, then resumed through iteration 12. Unlike the earlier synthetic fixture, this used the full default encoder, action decoder, world model and critic widths. It used 16 environments, pi/wm batches of 8, horizon 4, warmup 8, buffer 16, and BF16: it remains a small interface run, not a performance benchmark. All six CUDA graph phases captured before and after resume. At iteration 12 the encoder gradient norms were Motion `0.00559`, SMPL `0.00693`, Teleop `0.00344`; all auxiliary losses were finite.
+
+Repeat the fresh run (use a new output directory):
+
+```bash
+OMP_NUM_THREADS=2 .venv/bin/python scripts/train_omni.py \
+  --index results/omni_real20/index.json --data-root data/threepoint_samples \
+  --log-dir logs/omni_real20_smoke_repeat --gpus 1 \
+  --num_envs 16 --pi_batch 8 --wm_batch 8 --horizon 4 --wm_window 2 \
+  --buffer_steps 16 --warmup_steps 8 --iterations 6 --wm_batches 1 \
+  --critic_minibatches 2 --critic_epochs 1 --log_every 2 --amp bf16 --ckpt_every 6
+```
+
+For resume retain those settings, add `--resume logs/omni_real20_smoke_repeat/last.pt`, and set `--iterations 12`.
+
+The iteration-6 bundle is `deploy_artifacts/omni_real20_smoke_walk`. On the start/middle/end of all 20 real clips (60 samples), split ONNX versus PyTorch maximum action error was `2.24e-8`. All three modalities also passed pre/motion/post inference checks using fixed nonzero heading and current robot rotation. Evidence: `results/omni_real20/inference_validation.json`.
+
+All three iteration-12 evaluation entry points completed on the same 20 clips and wrote `results/omni_real20/eval_smoke_{motion,smpl,teleop}.{json,manifest.json,md}`. **Each had 20 failures and approximately 0.084 normalized return**: these nearly untrained policies do not track the motions. Entry-point execution is the only acceptance claim. Do not use the smoke bundle for hardware or interpret it as a completed final sim2sim. Full-data learning, actual two-A100 performance, trained-policy final simulation and live VR remain pending.
