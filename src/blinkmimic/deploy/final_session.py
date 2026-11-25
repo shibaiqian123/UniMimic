@@ -29,7 +29,7 @@ def run(a):
     plan=affinity_plan() if getattr(a,"runtime_affinity","auto")=="auto" else {}
     b=Bundle(a.bundle)
     session=new_session(a.out.resolve())
-    meta=dict(kind="blink_final_sim",coordinated_start=True,domain=a.dds_domain,iface="lo",bundle=str(a.bundle.resolve()),
+    meta=dict(modality=getattr(a,"modality","motion"),kind="blink_final_sim",coordinated_start=True,domain=a.dds_domain,iface="lo",bundle=str(a.bundle.resolve()),
               bundle_fingerprint=b.fingerprint,unitree_xml=str(a.unitree_xml.resolve()),
               inference_device=getattr(a,"inference_device","cpu"),rt_priority=priority,runtime_affinity=plan,stage=a.stage,sensor_profile=DEFAULT_PROFILE,physics_hz=1000,lowstate_hz=1000,
               lowcmd_hz=500,policy_hz=50,auto=a.auto)
@@ -63,7 +63,7 @@ def run(a):
         bridge=spawn("sim_bridge",[str(BRIDGE/"g1_sim_bridge"),str(session/"sim.mmap"),str(a.dds_domain)])
         runner=spawn("runner",[sys.executable,"-u",str(ROOT/"scripts/deploy/run_g1.py"),
             "--bundle",str(a.bundle.resolve()),"--iface","lo","--domain",str(a.dds_domain),"--sim",
-            "--stage",a.stage,"--inference-device",getattr(a,"inference_device","cpu"),"--log-dir",str(session/"runner"),"--status-file",str(session/"runner_status.json")])
+            "--stage",a.stage,"--modality",getattr(a,"modality","motion"),"--inference-device",getattr(a,"inference_device","cpu"),"--log-dir",str(session/"runner"),"--status-file",str(session/"runner_status.json")])
         if a.viewer:
             window=spawn("viewer",[sys.executable,"-u","-m","blinkmimic.deploy.final_view","--session",str(session),
                 "--gl-renderer",a.gl_renderer,"--render-hz",str(a.render_hz)])

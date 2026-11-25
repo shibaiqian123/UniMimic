@@ -24,6 +24,7 @@ def main():
     ap.add_argument("--cpu-affinity",help="comma-separated Linux CPUs for control, applied before ONNX initialization")
     ap.add_argument("--logger-cpus",default=os.environ.get("BLINK_LOG_CPUS"))
     ap.add_argument("--bridge-cpus",default=os.environ.get("BLINK_BRIDGE_CPUS"))
+    ap.add_argument("--modality",choices=["motion","smpl","teleop"],default="motion")
     ap.add_argument("--bundle",type=Path,required=True)
     ap.add_argument("--hardware-profile",type=Path,help="optional IMU transform overrides")
     ap.add_argument("--iface",required=True)
@@ -46,7 +47,7 @@ def main():
     profile=dict(DEFAULT_PROFILE)
     if a.hardware_profile:profile.update(json.loads(a.hardware_profile.read_text()))
     profile.pop("verified_on_this_robot",None)
-    policy=OnnxPolicy(b,a.inference_device)
+    policy=OnnxPolicy(b,a.inference_device,a.modality)
     ctl=Controller(b,profile,a.stage,policy=policy)
     print("Inference: "+json.dumps(policy.info),flush=True)
     if a.inject_fault:
@@ -58,6 +59,7 @@ def main():
                 if a.inject_fault=="nan": return np.full(29,np.nan)
                 time.sleep(.04)
             return original(*inputs)
+        injected.modality=original.modality
         ctl.core.policy=injected
     if not a.sim and not a.read_only:
         if input("Robot supported / area clear / L2+B ready? Type yes: ").strip()!="yes":return

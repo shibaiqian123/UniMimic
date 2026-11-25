@@ -147,6 +147,7 @@ def view(job,speed,render_hz=30.):
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--modality",choices=["motion","smpl","teleop"],default="motion")
     ap.add_argument("--bundle",type=Path,required=True)
     ap.add_argument("--cmd",choices=["g1","g2","standby","sweep","compare","timing","final"],default="g2")
     ap.add_argument("--train-xml",type=Path)
@@ -195,6 +196,9 @@ def main():
             configure_opengl(a.gl_renderer)
         from blinkmimic.deploy.final_session import run
         run(a);return
+    if a.modality!="motion":ap.error("--modality selection is supported by --cmd final")
+    if json.loads((a.bundle/"deploy_config.json").read_text()).get("schema")=="blinkmimic_single_motion_v4":
+        ap.error("omni bundles use --cmd final; legacy diagnostic runners are unchanged")
     if a.inference_device!="cpu":ap.error("--inference-device is for --cmd final; use existing --backend/--device for diagnostic modes")
     if a.out.exists():
         from blinkmimic.deploy.session import new_session

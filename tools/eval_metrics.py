@@ -27,6 +27,9 @@ parser.add_argument("ckpts", nargs="+")
 parser.add_argument("--motion_dir", type=str, default=None)
 parser.add_argument("--robot", type=str, default="g1")
 parser.add_argument("--out", type=str, default="results/metrics")
+parser.add_argument("--omni-index", default=None)
+parser.add_argument("--omni-data-root", default=None)
+parser.add_argument("--modality", choices=["motion","smpl","teleop"],default="motion")
 args = parser.parse_args()
 
 from blinkmimic.policy_inputs import policy_action, update_norms, normalizer_inputs, orientation_for
@@ -48,7 +51,14 @@ torch.backends.cuda.matmul.allow_tf32 = True
 dev = "cuda:0"
 robot = get_robot(args.robot)
 kin = Kinematics(robot, dev)
-motion = MotionLib.from_dir(args.motion_dir or robot.motion_dir, robot, kin, dev)
+if args.omni_index:
+    from blinkmimic.omni_data import ReferenceStore
+    from blinkmimic.omni_runtime import load_motion
+    omni_store=ReferenceStore(args.omni_index,robot.joint_names)
+    if not args.omni_data_root:parser.error("--omni-data-root required")
+    motion=load_motion(omni_store,args.omni_data_root,robot,kin,dev)
+else:
+    motion = MotionLib.from_dir(args.motion_dir or robot.motion_dir, robot, kin, dev)
 mdp = MDP(kin, motion, torch.tensor(robot.default_joint_pos_list(), device=dev), XiLayout(robot, dev).dim, robot.sensing)
 C = len(motion.names)
 FEET = [robot.tracked_bodies.index(b) for b in ("left_ankle_roll_link", "right_ankle_roll_link")]
@@ -56,6 +66,11 @@ FEET = [robot.tracked_bodies.index(b) for b in ("left_ankle_roll_link", "right_a
 
 def load_policy(ck):
     a_ = ck["args"]
+    if a_.get("omni_contract"):
+        if not args.omni_index:raise ValueError("omni evaluation requires paired index")
+        from blinkmimic.omni_export import load_policy as load_omni
+        return load_omni(ck,dev)
+    if args.omni_index:raise ValueError("paired omni evaluation needs omni checkpoints")
     widths = lambda key: tuple(int(x) for x in a_.get(key, "2048,1024,512,256").split(","))  # noqa: E731
     pi = Policy(mdp.obs_dim, motion.goal_dim(a_["goal_frames"]), robot.num_joints, hist=a_["hist"],
                 enc_hidden=widths("enc_hidden"), dec_hidden=widths("dec_hidden"), **policy_kwargs(a_, robot)).to(dev)  # fmt: skip
@@ -88,7 +103,16 @@ def run(cks):
         robot_R=env.state()[1] if any(p.observation_mode=="proprio93" for p in pis) else None
         for m, pi in enumerate(pis):
             sl = slice(m * C, (m + 1) * C)
-            a[sl] = policy_action(pi,hist[sl],g[sl],orientation_for(pi,motion,env.f[sl],robot_R[sl] if robot_R is not None else None,K))
+            if args.omni_index:
+                frames=env.f[sl]
+                clip=motion.clip_id[frames]
+                local=frames-motion.clip_start[clip]
+                refs=omni_store.prefetch(clip.cpu().numpy(),local.cpu().numpy(),dev)
+                inputs=omni_store.inputs(refs,robot_R[sl])
+                tokens=pi.encode_tokens(args.modality,inputs[args.modality])
+                a[sl]=pi.decode_tokens(hist[sl,...,:93],tokens)
+            else:
+                a[sl] = policy_action(pi,hist[sl],g[sl],orientation_for(pi,motion,env.f[sl],robot_R[sl] if robot_R is not None else None,K))
         alive = (~env.done_eval).float()
         if previous is not None:
             acc["action_delta"] += alive * (a-previous).square().mean(-1)
@@ -100,7 +124,8 @@ def run(cks):
         t = out["terms"]
         bp, _, bv, _ = kin.forward(*S1)
         fz, fv = bp[:, FEET, 2], bv[:, FEET, :2].norm(dim=-1)
-        rz, rv = motion.body_p[f1][:, FEET, 2], motion.body_v[f1][:, FEET, :2].norm(dim=-1)
+        ref_bp,_,ref_bv,_=motion.ref_bodies(f1)
+        rz, rv = ref_bp[:, FEET, 2], ref_bv[:, FEET, :2].norm(dim=-1)
         c_sim, c_ref = fz < CONTACT_Z, rz < CONTACT_Z
         acc["n"] += alive
         acc["ret"] += alive * out["r"]
@@ -160,10 +185,17 @@ os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 open(args.out + ".md", "w").write(table + "\n")
 json.dump({p: r for p, r in zip(args.ckpts, res)}, open(args.out + ".json", "w"), indent=1)
 
+selected_paths=([Path(args.omni_data_root)/r["g1_path"] for r in omni_store.records] if args.omni_index else
+                sorted(Path(args.motion_dir or robot.motion_dir).glob(robot.motion_glob)))
 manifest = dict(protocol="clip-start-no-noise-no-DR", motion_dir=str(Path(args.motion_dir or robot.motion_dir).resolve()),
                 files=[dict(name=p.name,sha256=hashlib.sha256(p.read_bytes()).hexdigest())
-                       for p in sorted(Path(args.motion_dir or robot.motion_dir).glob(robot.motion_glob))],
+                       for p in selected_paths],
                 checkpoints=[dict(path=str(Path(p).resolve()),sha256=hashlib.sha256(Path(p).read_bytes()).hexdigest(),
                                   latent_spec=ck["args"].get("latent_spec"),seed=ck["args"].get("seed"),
                                   iteration=ck["iteration"]) for p,ck in zip(args.ckpts,cks)])
+if args.omni_index:
+    manifest.update(modality=args.modality,omni_index=str(Path(args.omni_index).resolve()),
+                    omni_index_sha256=hashlib.sha256(Path(args.omni_index).read_bytes()).hexdigest(),
+                    motion_ids=[r["motion_id"] for r in omni_store.records])
+    manifest.pop("motion_dir",None)
 json.dump(manifest,open(args.out+".manifest.json","w"),indent=2)

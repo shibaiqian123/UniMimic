@@ -50,11 +50,15 @@ class Bundle:
         self.path = Path(path)
         self.cfg = json.loads((self.path / "deploy_config.json").read_text())
         c = self.cfg
-        if c["schema"] not in ("blinkmimic_single_motion_v1","blinkmimic_single_motion_v2","blinkmimic_single_motion_v3") or c["joint_names"] != JOINTS:
+        if c["schema"] not in ("blinkmimic_single_motion_v1","blinkmimic_single_motion_v2","blinkmimic_single_motion_v3","blinkmimic_single_motion_v4") or c["joint_names"] != JOINTS:
             raise ValueError("unsupported schema / motor order")
-        v3=c["schema"]=="blinkmimic_single_motion_v3"
-        v2=c["schema"] in ("blinkmimic_single_motion_v2","blinkmimic_single_motion_v3")
-        if v3:
+        v4=c["schema"]=="blinkmimic_single_motion_v4"
+        v3=c["schema"] in ("blinkmimic_single_motion_v3","blinkmimic_single_motion_v4")
+        if v4:
+            from blinkmimic.omni_contract import CONTRACT
+            if c.get("omni_contract")!=CONTRACT:raise ValueError("omni contract mismatch")
+        v2=c["schema"] in ("blinkmimic_single_motion_v2","blinkmimic_single_motion_v3","blinkmimic_single_motion_v4")
+        if v3 and not v4:
             from blinkmimic.observation_contract import contract
             if c.get("observation_spec")!=contract("proprio93"):
                 raise ValueError("unsupported future orientation contract")
@@ -68,7 +72,9 @@ class Bundle:
         gain=c.get("preparation_gain_scale",1.0)
         if not np.isfinite(gain) or gain<=0:
             raise ValueError("unsupported preparation gain scale")
-        for name in (("policy.onnx", "motion.npz", "motion_encoder.onnx", "decoder.onnx") if v2 else ("policy.onnx", "motion.npz")):
+        files=(("motion.npz","motion_encoder.onnx","smpl_encoder.onnx","teleop_encoder.onnx","decoder.onnx") if v4 else
+               (("policy.onnx", "motion.npz", "motion_encoder.onnx", "decoder.onnx") if v2 else ("policy.onnx", "motion.npz")))
+        for name in files:
             if digest(self.path/name) != c["sha256"][name]:
                 raise ValueError("bundle hash mismatch: " + name)
         for key in ("q0","scale","kp","kd","effort","lower","upper","velocity"):
@@ -81,6 +87,13 @@ class Bundle:
         with np.load(self.path/"motion.npz", allow_pickle=False) as z:
             self.motion = {k: z[k].copy() for k in z.files}
         self.T = len(self.motion["q"])
+        if v4:
+            ref=self.motion.get("omni_reference")
+            if ref is None or ref.shape!=(self.T,184) or not np.isfinite(ref).all():
+                raise ValueError("invalid omni reference")
+            expected_wrists=[JOINTS.index(f"{side}_wrist_{axis}_joint") for axis in ("roll","pitch","yaw") for side in ("left","right")]
+            if c["omni_lower"]!=list(range(12)) or c["omni_wrists"]!=expected_wrists:
+                raise ValueError("invalid omni joint mapping")
         shapes = {"q":(self.T,29),"root_R":(self.T,3,3),"goal":(self.T,730),"static_goal":(2,730)}
         if self.T < 2:
             raise ValueError("motion too short")
@@ -98,7 +111,7 @@ def inference_device(value):
     raise ValueError("inference device must be cpu or cuda:N")
 
 class OnnxPolicy:
-    def __init__(self, bundle, device="cpu"):
+    def __init__(self, bundle, device="cpu", modality="motion"):
         device=inference_device(device)
         import onnxruntime as ort
         if device!="cpu":
@@ -115,7 +128,19 @@ class OnnxPolicy:
         providers=["CPUExecutionProvider"] if device=="cpu" else [
             ("CUDAExecutionProvider",{"device_id":int(device.split(":")[1]),"use_tf32":0}),
             "CPUExecutionProvider"]
-        self.session = ort.InferenceSession(str(bundle.path/"policy.onnx"), so, providers=providers)
+        self.omni=bundle.cfg["schema"]=="blinkmimic_single_motion_v4"
+        self.modality=modality
+        if not self.omni and modality!="motion":raise ValueError("SMPL/Teleop require an omni v4 bundle")
+        self.session = ort.InferenceSession(str(bundle.path/("decoder.onnx" if self.omni else "policy.onnx")), so, providers=providers)
+        if self.omni:
+            from blinkmimic.omni_contract import DIMS
+            if modality not in DIMS:raise ValueError("unknown omni modality")
+            self.encoder=ort.InferenceSession(str(bundle.path/(modality+"_encoder.onnx")),so,providers=providers)
+            self.encoder.disable_fallback()
+            if device!="cpu" and "CUDAExecutionProvider" not in self.encoder.get_providers():
+                raise RuntimeError("Encoder CUDA provider failed to initialize")
+            ei={i.name:i.shape[1:] for i in self.encoder.get_inputs()}
+            if ei!={"features":[DIMS[modality]]}:raise ValueError("invalid omni encoder interface")
         if device!="cpu" and "CUDAExecutionProvider" not in self.session.get_providers():
             raise RuntimeError("CUDA provider failed to initialize; refusing silent CPU fallback")
         self.session.disable_fallback()
@@ -128,14 +153,22 @@ class OnnxPolicy:
         if outs.get("actions",[None,None])[1:] != [29]:
             raise ValueError("invalid ONNX action output")
         self.proprio93=bundle.cfg["obs_dim"]==93
-        expected={"obs_history":[10,bundle.cfg["obs_dim"]],"goal":[730]}
-        if self.proprio93:expected["orientation6d_future"]=[10,6]
+        expected=({"obs_history":[10,93],"tokens":[2,32]} if self.omni else
+                  {"obs_history":[10,bundle.cfg["obs_dim"]],"goal":[730]})
+        if self.proprio93 and not self.omni:expected["orientation6d_future"]=[10,6]
+        if self.omni:
+            self.info["modality"]=modality
+            for _ in range(16):
+                self.encoder.run(["tokens"],{"features":np.zeros((1,DIMS[modality]),np.float32)})
         if set(ins)!=set(expected) or any(ins[k][1:]!=shape for k,shape in expected.items()):
             raise ValueError("invalid ONNX inputs")
         # Warm caches/allocators before DDS command publication, without advancing controller state.
         feed={name:np.zeros([1]+shape,dtype=np.float32) for name,shape in expected.items()}
         for _ in range(16):self.session.run(["actions"],feed)
     def __call__(self, history, goal, orientation6d_future=None):
+        if self.omni:
+            tokens=self.encoder.run(["tokens"],{"features":np.asarray(goal,np.float32)[None]})[0]
+            return self.session.run(["actions"],{"obs_history":np.asarray(history,np.float32)[None],"tokens":tokens})[0][0]
         feed={"obs_history":history[None].astype(np.float32),"goal":goal[None].astype(np.float32)}
         if self.proprio93:
             if orientation6d_future is None or np.shape(orientation6d_future)!=(10,6):
@@ -199,8 +232,15 @@ class DeployCore:
         hist = self.observe(np.asarray(q),np.asarray(dq),np.asarray(gyro),R)
         cpu_t = time.thread_time()
         t = time.perf_counter()
-        a = np.asarray(self.policy(hist,g,self.orientation6d_future) if self.b.cfg.get("obs_dim",99)==93
-                       else self.policy(hist,g),float)
+        if self.b.cfg.get("schema")=="blinkmimic_single_motion_v4":
+            from .omni import features
+            x=features(self.b,f,R,self.heading,self.phase,getattr(self.policy,"modality","motion"))
+            self.orientation6d_future=(R.T@self.heading@self.b.motion["root_R"][
+                np.minimum(f+np.arange(10)*5,self.b.T-1) if self.phase=="motion" else np.full(10,f)])[...,:2].reshape(10,6)
+            a=np.asarray(self.policy(hist,x),float)
+        else:
+            a = np.asarray(self.policy(hist,g,self.orientation6d_future) if self.b.cfg.get("obs_dim",99)==93
+                           else self.policy(hist,g),float)
         ms = (time.perf_counter()-t)*1000
         cpu_ms = (time.thread_time()-cpu_t)*1000
         if a.shape != (29,) or not np.isfinite(a).all():
