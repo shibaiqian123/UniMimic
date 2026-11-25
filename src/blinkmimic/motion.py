@@ -20,6 +20,21 @@ BIN_FRAMES = 50  # 1 s bins for return-based reset sampling
 GOAL_Q_OFFSET = 15  # index of the joint positions q(f+1) in the goal vector (first future frame: dp 3, rot 6, v 3, w 3, then q)
 
 
+def resample_motion(p, quat, j, src_fps):
+    """Shared training/cache 50 Hz interpolation; returns CPU float32 tensors."""
+    p, quat, j = (torch.tensor(x, dtype=torch.float32) for x in (p, quat, j))
+    T_src = p.shape[0]
+    dur = (T_src - 1) / src_fps
+    n = int(np.floor(dur / CONTROL_DT)) + 1
+    t = torch.arange(n, dtype=torch.float32) * CONTROL_DT * src_fps
+    i0 = torch.clamp(t.floor().long(), max=T_src - 2)
+    a = (t - i0.float()).clamp(0, 1)
+    p = p[i0] * (1 - a[:, None]) + p[i0 + 1] * a[:, None]
+    j = j[i0] * (1 - a[:, None]) + j[i0 + 1] * a[:, None]
+    quat = quat_slerp(quat[i0], quat[i0 + 1], a)
+    return p, quat, j
+
+
 class MotionLib:
     def __init__(self, files: list[str], kin: Kinematics, device: str, load_motion: Callable[[str], MotionArrays], *, compact: bool = False):
         self.device = device
@@ -30,17 +45,8 @@ class MotionLib:
         lens = []
         for file_index, f in enumerate(files):
             p, quat, j, src_fps = load_motion(f)
-            p, quat, j = (torch.tensor(x, dtype=torch.float32) for x in (p, quat, j))
-            # resample to 50 Hz
-            T_src = p.shape[0]
-            dur = (T_src - 1) / src_fps
-            n = int(np.floor(dur / CONTROL_DT)) + 1
-            t = torch.arange(n, dtype=torch.float32) * CONTROL_DT * src_fps
-            i0 = torch.clamp(t.floor().long(), max=T_src - 2)
-            a = (t - i0.float()).clamp(0, 1)
-            p = p[i0] * (1 - a[:, None]) + p[i0 + 1] * a[:, None]
-            j = j[i0] * (1 - a[:, None]) + j[i0 + 1] * a[:, None]
-            quat = quat_slerp(quat[i0], quat[i0 + 1], a)
+            p, quat, j = resample_motion(p, quat, j, src_fps)
+            n = len(p)
             ps.append(p), qs.append(quat), js.append(j)
             lens.append(n)
             if compact and ((file_index+1)%2000==0 or file_index+1==len(files)):
