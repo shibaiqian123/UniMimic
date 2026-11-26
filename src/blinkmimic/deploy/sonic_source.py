@@ -18,7 +18,8 @@ class Source:
         self.start=0;self.stop=0;self.planner_mode=True;self.command_time=0.
         self.pose={};self.pose_time=0.;self.last_frame=-1;self.packet_ids=[]
         self.plan={};self.plan_time=0.;self.error=""
-        self.epoch=0
+        self.epoch=0;self.heading_delta=0.;self.pose_interval=0.;self.pose_packets=0
+        self.sensor_time=None
     def accept(self,topic,x,now):
         if topic=="command":
             stop=bool(x.get("stop",[0])[0]);start=bool(x.get("start",[0])[0])
@@ -27,8 +28,9 @@ class Source:
             elif start:self.start+=1
             pm=bool(x.get("planner",[1])[0])
             if pm!=self.planner_mode:
-                self.epoch+=1;self.pose.clear();self.packet_ids=[];self.last_frame=-1;self.pose_time=0.;self.plan_time=0.
+                self.epoch+=1;self.pose.clear();self.sensor_time=None;self.packet_ids=[];self.last_frame=-1;self.pose_time=0.;self.plan_time=0.
             self.planner_mode=pm;self.command_time=now
+            if "delta_heading" in x:self.heading_delta=float(x["delta_heading"][0])
         elif topic=="planner":
             for key,shape in (("mode",(1,)),("movement",(3,)),("facing",(3,))):
                 if key not in x or x[key].shape!=shape:raise ValueError("planner field "+key)
@@ -41,8 +43,17 @@ class Source:
             if not n or x.get("smpl_joints",np.zeros(0)).shape!=(n,24,3) or x.get("body_quat_w",np.zeros(0)).shape!=(n,4) or x.get("joint_pos",np.zeros(0)).shape!=(n,29):
                 raise ValueError("expected SONIC pose v3: SMPL [N,24,3], quaternion [N,4], joint_pos [N,29]")
             if int(ids[-1])<=self.last_frame:return # no freshness renewal for duplicate/out-of-order frames
+            sensor_time=x.get("timestamp_monotonic")
+            if sensor_time is not None:
+                sensor_time=float(np.asarray(sensor_time).reshape(-1)[0])
+                if not np.isfinite(sensor_time):raise ValueError("invalid pose sensor timestamp")
+                if self.sensor_time is not None and sensor_time<=self.sensor_time:return
+                self.sensor_time=sensor_time
             for i,frame in enumerate(ids):
                 self.pose[int(frame)]=(x["smpl_joints"][i],x["body_quat_w"][i],x["joint_pos"][i])
+            self.pose_interval=now-self.pose_time if self.pose_time else 0.
+            self.pose_packets+=1
+            self.heading_delta+=float(np.asarray(x.get("heading_increment",[0.])).reshape(-1)[0])
             self.last_frame=int(ids[-1]);self.pose_time=now;self.packet_ids=[int(k) for k in ids][-10:]
             self.pose={k:v for k,v in self.pose.items() if k>=self.last_frame-64}
     def pose_window(self):
@@ -56,10 +67,12 @@ class Source:
         ids=ids+[ids[-1]]*(10-len(ids))
         values=[self.pose[k] for k in ids]
         return dict(smpl=np.stack([v[0] for v in values]),quat=np.stack([v[1] for v in values]),
-                    joints=np.stack([v[2] for v in values]),frame=int(ids[0]))
+                    joints=np.stack([v[2] for v in values]),frame=int(ids[0]),
+                    padded_frames=10-len(self.packet_ids) if len(set(ids))>1 else 9)
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--stationary-lower-body",action="store_true")
     p.add_argument("--bundle",type=Path,required=True);p.add_argument("--planner-model",type=Path,required=True)
     p.add_argument("--vr-endpoint",default="tcp://127.0.0.1:5556")
     p.add_argument("--feedback-endpoint",default="tcp://127.0.0.1:5557")
@@ -108,6 +121,7 @@ def main():
                 context=sample_qpos(seq,((pending_start-seq_start)+np.arange(4)/30)*50)
                 # Match upstream idle fallback on a stale planner command.
                 command=source.plan if now-source.plan_time<=1. else {}
+                if a.stationary_lower_body:command={}
                 pending=executor.submit(planner.generate,context,command);last_plan=now
             qpos,qd=planner_window(seq,seq_start,now)
             window=source.pose_window()
@@ -115,11 +129,14 @@ def main():
                   "PLANNER_FROZEN_UPPER" if "upper_body_position" in source.plan else "PLANNER") if source.planner_mode else "POSE"
             requested_mode=mode
             if mode=="POSE" and window is None:mode="PLANNER" # hold idle while collecting the causal window
-            payload=dict(requested_mode=requested_mode,t=now,start=source.start,stop=source.stop,mode=mode,epoch=source.epoch,error=source.error,
+            payload=dict(switch_wait_s=now-source.command_time if mode!=requested_mode else 0.,requested_mode=requested_mode,t=now,start=source.start,stop=source.stop,mode=mode,epoch=source.epoch,error=source.error,
                 source_time=max(source.command_time,source.plan_time if source.planner_mode else source.pose_time),
                 plan_time=seq_start,plan_end=seq_start+(len(seq)-1)/50,planner_ms=ms,
                 qpos=qpos,qd=qd,pose=window,planner=source.plan,
-                isaac_joint_names=ISAAC_NAMES,pose_delay_s=0.,pose_window_policy="latest_packet_endpoint_hold")
+                isaac_joint_names=ISAAC_NAMES,heading_delta=source.heading_delta,
+                stationary_lower_body=a.stationary_lower_body,pose_packets=source.pose_packets,
+                pose_received_time=source.pose_time,pose_sensor_time=source.sensor_time,pose_interval_s=source.pose_interval,
+                pose_padded_frames=window["padded_frames"] if window else 0,pose_delay_s=0.,pose_window_policy="latest_packet_endpoint_hold")
             pub.send(b"reference"+json.dumps(payload,default=aslist,separators=(",",":")).encode(),zmq.NOBLOCK)
             time.sleep(max(0.,.02-(time.monotonic()-now)))
     finally:

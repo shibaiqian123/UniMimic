@@ -28,6 +28,8 @@ def main():
     ap.add_argument("--vr-reference", help="live SONIC reference endpoint; enables VR controller")
     ap.add_argument("--vr-feedback-bind", default="tcp://*:5557")
     ap.add_argument("--bundle",type=Path,required=True)
+    ap.add_argument("--motor-kp-scale",default="")
+    ap.add_argument("--motor-kd-scale",default="")
     ap.add_argument("--hardware-profile",type=Path,help="optional IMU transform overrides")
     ap.add_argument("--iface",required=True)
     ap.add_argument("--domain",type=int,required=True)
@@ -46,6 +48,8 @@ def main():
         ap.error("hardware requires explicit domain 0 and robot NIC")
     if a.cpu_affinity:os.sched_setaffinity(0,cpu_list(a.cpu_affinity))
     b=Bundle(a.bundle)
+    from blinkmimic.deploy.hardware import apply_gains,release_motion
+    effective_gains=apply_gains(b,a.motor_kp_scale,a.motor_kd_scale)
     profile=dict(DEFAULT_PROFILE)
     if a.hardware_profile:profile.update(json.loads(a.hardware_profile.read_text()))
     profile.pop("verified_on_this_robot",None)
@@ -72,6 +76,8 @@ def main():
         ctl.core.policy=injected
     if not a.sim and not a.read_only:
         if input("Robot supported / area clear / L2+B ready? Type yes: ").strip()!="yes":return
+    takeover=release_motion(Path(__file__).resolve().parent/"bridge",a.iface,a.domain,a.sim,a.read_only)
+    print("Motion takeover: "+json.dumps(takeover),flush=True)
     a.log_dir=new_session(a.log_dir.resolve())
     print(f"Runner logs: {a.log_dir}",flush=True)
     log=RuntimeLog(a.log_dir/"runner.jsonl",cpu_list(a.logger_cpus))
@@ -80,7 +86,7 @@ def main():
                               temperature_channel_source="unitreerobotics/unitree_sdk2 include/unitree/robot/g1/common/terminations.hpp",
                               torque_log_semantics={"s.tau":"LowState tau_est, Nm",
                                   "result.pd_torque_estimate":"PD estimate at sampled q/dq; not measured torque"},
-                              profile=profile,effective_limits=ctl.limits,effective_stage=ctl.stage,arguments={k:str(v) for k,v in vars(a).items()},control_cpus=sorted(os.sched_getaffinity(0))))
+                              profile=profile,takeover=takeover,effective_gains=effective_gains,effective_limits=ctl.limits,effective_stage=ctl.stage,arguments={k:str(v) for k,v in vars(a).items()},control_cpus=sorted(os.sched_getaffinity(0))))
     stop=[False]
     for sig in (signal.SIGINT,signal.SIGTERM):
         signal.signal(sig,lambda *_: stop.__setitem__(0,True))
@@ -171,7 +177,7 @@ def main():
                     ctl.damp(f"state expired after control: phase={ctl.state}, age_ms={age*1000:.2f}, limit_ms={ctl.limits['state_age_s']*1000:.2f}"); out=ctl.damping(s)
                 q[:29]=out["target"]; kp[:29]=out["kp"]; kd[:29]=out["kd"]
                 flags=gb.CMD_NOW | (gb.CMD_Q_MEASURED if ctl.state=="DAMP" else 0)
-                if not bridge.send(q,kp,kd,modes,5,flags):
+                if not bridge.send(q,kp,kd,modes,s["mode_machine"],flags):
                     ctl.damp("bridge send failed")
                 else:
                     command_started=True
@@ -216,7 +222,7 @@ def main():
             q.fill(0); kp.fill(0); kd[:29]=3.
             until=time.monotonic()+10.
             while time.monotonic()<until and bridge.alive():
-                bridge.send(q,kp,kd,modes,5,gb.CMD_NOW|gb.CMD_Q_MEASURED)
+                bridge.send(q,kp,kd,modes,s["mode_machine"],gb.CMD_NOW|gb.CMD_Q_MEASURED)
                 time.sleep(.02)
         raise
     finally:

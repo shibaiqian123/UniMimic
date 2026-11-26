@@ -16,3 +16,7 @@ g++ -O2 -std=c++17 -Wall -I"$SDK/include" -I"$SDK/thirdparty/include" -I"$SDK/th
     -Wl,--disable-new-dtags,-rpath,"$TL"
 g++ -O2 -std=c++17 -Wall -shared -fPIC g1_sim_client.cpp -o libg1sim_client.so -lpthread
 echo "built simulation adapter and client"
+
+g++ -O2 -std=c++17 -Wall -I"$SDK/include" -I"$SDK/thirdparty/include" -I"$SDK/thirdparty/include/ddscxx" \
+    g1_release_mode.cpp -o g1_release_mode -L"$SDK/lib/$ARCH" -lunitree_sdk2 -L"$TL" -lddscxx -lddsc -lpthread \
+    -Wl,--disable-new-dtags,-rpath,"$TL"

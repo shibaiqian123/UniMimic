@@ -47,15 +47,26 @@ class LiveCore(DeployCore):
     def __init__(self,bundle,policies):
         super().__init__(bundle,policies["motion"])
         self.policies=policies;self.message=None;self.pose_heading=None;self.robot_yaw=None
-        self.live_mode="OFF";self.visual={}
+        self.live_mode="OFF";self.visual={};self.previous_modality=None;self.last_reference=None;self.pose_delta_base=0.
     def align(self,R):
         self.robot_yaw=yaw(R);self.heading=yaw_rotation(self.robot_yaw)
     def reference(self):return 0,self.b.motion["static_goal"][0]
     def step(self,q,dq,gyro,R):
-        if self.pose_heading is None and self.message.get("pose") is not None:
-            self.pose_heading=yaw_rotation(self.robot_yaw-yaw(rotation(self.message["pose"]["quat"][0])))
-        modality,x,ref,visual=inputs(self.message,self.b,R,self.heading,
-                                    self.pose_heading if self.pose_heading is not None else self.heading)
+        # Align source coordinate frames at mode edges, preserving the last reference
+        # heading (including tracking error), never resetting to measured yaw each tick.
+        mode=self.message["mode"];delta=float(self.message.get("heading_delta",0.))
+        desired=self.last_reference if self.last_reference is not None else self.heading
+        if mode=="POSE" and self.previous_modality!="smpl":
+            root=rotation(self.message["pose"]["quat"][0])
+            self.pose_heading=yaw_rotation(yaw(desired)-yaw(root))
+            self.pose_delta_base=delta
+        elif mode!="POSE" and self.previous_modality=="smpl":
+            root=rotation(self.message["qpos"][0][3:7])
+            self.heading=yaw_rotation(yaw(desired)-yaw(root))
+        pose_heading=yaw_rotation(delta-self.pose_delta_base) @ (
+            self.pose_heading if self.pose_heading is not None else self.heading)
+        modality,x,ref,visual=inputs(self.message,self.b,R,self.heading,pose_heading)
+        self.previous_modality=modality;self.last_reference=ref.copy()
         o=np.concatenate((q-self.b.q0,dq,gyro,-R[2],self.last_action))
         if o.shape!=(93,) or not np.isfinite(o).all() or not np.isfinite(x).all():raise ValueError("nonfinite live features")
         self.history=np.repeat(o[None],10,axis=0) if self.history is None else np.concatenate((self.history[1:],o[None]))
@@ -67,7 +78,11 @@ class LiveCore(DeployCore):
         self.last_action=a.copy();self.frame+=1;self.phase="motion";self.live_mode=self.message["mode"];self.visual=dict(visual,reference_R=ref.tolist())
         return dict(action=a,target=self.b.q0+self.b.scale*a,frame=self.frame,phase=self.phase,
                     inference_ms=ms,inference_thread_cpu_ms=cpu_ms,modality=modality,live_mode=self.live_mode,
-                    reference_R=ref,features=x,source_age_s=time.monotonic()-self.message["source_time"])
+                    reference_R=ref,features=x,pose_interval_s=self.message.get("pose_interval_s",0.),
+                    pose_padded_frames=self.message.get("pose_padded_frames",0),
+                    pose_received_time=self.message.get("pose_received_time",0.),
+                    pose_sensor_time=self.message.get("pose_sensor_time"),
+                    switch_wait_s=self.message.get("switch_wait_s",0.),requested_mode=self.message.get("requested_mode"),source_age_s=time.monotonic()-self.message["source_time"])
 
 class ReferenceClient:
     def __init__(self,endpoint,feedback_bind):

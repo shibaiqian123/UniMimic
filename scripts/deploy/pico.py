@@ -2,6 +2,7 @@
 import argparse
 from pathlib import Path
 import shlex
+import socket
 import subprocess
 import time
 
@@ -33,6 +34,21 @@ def commands(a):
     return root, result
 
 
+def listening(host,port):
+    try:
+        with socket.create_connection((host,port),timeout=.3):return True
+    except OSError:return False
+
+def check_ports(a):
+    with socket.socket() as sock:
+        try:sock.bind(("0.0.0.0",a.port))
+        except OSError as e:
+            raise RuntimeError(f"PICO streamer port {a.port} occupied; close the previous streamer: {e}") from e
+    if not listening(a.feedback_host,a.feedback_port):
+        print(f"Feedback {a.feedback_host}:{a.feedback_port} absent: start BlinkMimic runner before VR wrist calibration.",flush=True)
+    if not listening(a.listen_host,63901):
+        print("PC Service 63901 not listening yet; checking again after original streamer startup.",flush=True)
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--groot-root", type=Path, required=True)
@@ -58,10 +74,20 @@ def main():
     for _, cmd in jobs:
         if not Path(cmd[0]).is_file():
             p.error("Missing original GR00T environment: " + cmd[0])
+    check_ports(a)
     children = []
     try:
         for name, cmd in jobs:
             children.append((name, subprocess.Popen(cmd, cwd=root)))
+        deadline=time.monotonic()+10
+        while not listening(a.listen_host,63901):
+            if time.monotonic()>deadline:
+                raise RuntimeError("PC Service tracking port 63901 failed to listen. Stop this launcher, restart "
+                    "/opt/apps/roboticsservice/runService.sh after stopping the failed RoboticsServiceProcess, "
+                    "then restart pico.py. See ~/.local/share/PICOBusinessSuitData/log/. "
+                    "Video port 13579 is unrelated.")
+            time.sleep(.2)
+        print("PC Service 63901 is listening. PICO Network should show WORKING.",flush=True)
         while True:
             for name, child in children:
                 status = child.poll()

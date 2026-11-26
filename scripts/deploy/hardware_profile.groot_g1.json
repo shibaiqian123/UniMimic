@@ -1,0 +1,8 @@
+{
+  "imu_frame": "pelvis_rigid",
+  "quaternion_order": "wxyz",
+  "gyro_units": "rad/s",
+  "R_pelvis_from_imu_wxyz": [1, 0, 0, 0],
+  "provenance": "GR00T local commit 2f07b35b3f3b9053b1f4fd2adeaf56b6bce32366: HG LowState imu_state (not torso IMU), motor_state indices 0..28. Unit mounting transform is a reference assumption, not a measured calibration.",
+  "hardware_calibrated": false
+}

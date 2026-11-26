@@ -21,7 +21,7 @@ def main():
     ctx=zmq.Context();pub=ctx.socket(zmq.PUB);pub.bind("tcp://127.0.0.1:15556")
     cmd=[sys.executable,"-u",str(ROOT/"scripts/deploy/teleop.py"),"sim","--bundle",str(a.bundle.resolve()),
          "--groot-root",str(a.groot_root),"--unitree-xml",str(a.unitree_xml),"--vr-port","15556",
-         "--feedback-port","15557","--reference-port","15558","--duration","40","--out",str(a.out/"sessions")]
+         "--feedback-port","15557","--reference-port","15558","--stationary-lower-body","--stage","slack","--duration","45","--out",str(a.out/"sessions")]
     logfile=open(a.out/"console.log","w")
     proc=subprocess.Popen(cmd,stdout=logfile,stderr=subprocess.STDOUT,cwd=ROOT)
     phase=-1;started=None;frame=0;events=[]
@@ -35,23 +35,22 @@ def main():
             if not ready.exists() or "source ready" not in ready.read_text():time.sleep(.1);continue
             if started is None:started=time.monotonic()
             elapsed=time.monotonic()-started
-            new=0 if elapsed<7 else 1 if elapsed<13 else 2 if elapsed<19 else 3
+            new=0 if elapsed<7 else 1 if elapsed<13 else 2 if elapsed<16 else 3 if elapsed<22 else 4
             if new!=phase:
                 phase=new;events.append(dict(t=elapsed,phase=phase))
-                command=dict(start=np.array([phase==0],np.uint8),stop=np.array([phase==3 and not a.disconnect],np.uint8),
+                command=dict(start=np.array([phase==0],np.uint8),stop=np.array([phase==4 and not a.disconnect],np.uint8),
                              planner=np.array([phase!=1],np.uint8))
-                if not (phase==3 and a.disconnect):pub.send(pack("command",command))
-            if phase==3 and a.disconnect:time.sleep(.02);continue
+                if not (phase==4 and a.disconnect):pub.send(pack("command",command))
+            if phase==4 and a.disconnect:time.sleep(.02);continue
             if phase==1:
-                n=3;ids=np.arange(frame,frame+n,dtype=np.int64);frame+=n
-                # This synthetic producer sends 3 successive samples per packet at 50 Hz packet rate;
-                # only smoke-test the field contract, not recorded human timing.
+                n=1;ids=np.array([frame],dtype=np.int64);frame+=1
+                # One frame per 20ms, matching the low-latency PICO sender.
                 pub.send(pack("pose",dict(frame_index=ids,smpl_joints=np.tile(r[67:139].reshape(24,3),(n,1,1)).astype(np.float32),
                      body_quat_w=np.tile(quat,(n,1)).astype(np.float32),joint_pos=np.tile(q,(n,1)).astype(np.float32))))
             else:
                 fields=dict(mode=np.array([0],np.int32),movement=np.zeros(3,np.float32),facing=np.array([1,0,0],np.float32),
                             speed=np.array([-1],np.float32),height=np.array([-1],np.float32))
-                if phase==2:
+                if phase==3:
                     fields.update(vr_position=r[148:157].astype(np.float32),vr_orientation=pointq.astype(np.float32).reshape(-1))
                 pub.send(pack("planner",fields))
             time.sleep(.02)

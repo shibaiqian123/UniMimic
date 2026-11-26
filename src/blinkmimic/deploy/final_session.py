@@ -69,12 +69,12 @@ def run(a):
                 "--vr-endpoint",f"tcp://{a.vr_host}:{a.vr_port}",
                 "--feedback-endpoint",f"tcp://127.0.0.1:{a.vr_feedback_port}",
                 "--reference-bind",f"tcp://127.0.0.1:{a.vr_reference_port}",
-                "--record",str(session/"vr_packets.msgpack")])
+                "--record",str(session/"vr_packets.msgpack")]+(["--stationary-lower-body"] if a.stationary_lower_body else []))
             vr_args=["--vr-reference",f"tcp://127.0.0.1:{a.vr_reference_port}",
                      "--vr-feedback-bind",f"tcp://*:{a.vr_feedback_port}"]
         runner=spawn("runner",[sys.executable,"-u",str(ROOT/"scripts/deploy/run_g1.py"),
             "--bundle",str(a.bundle.resolve()),"--iface","lo","--domain",str(a.dds_domain),"--sim",
-            "--stage",a.stage,"--modality",getattr(a,"modality","motion"),"--inference-device",getattr(a,"inference_device","cpu"),"--log-dir",str(session/"runner"),"--status-file",str(session/"runner_status.json")]+vr_args)
+            "--stage",a.stage,"--modality",getattr(a,"modality","motion"),"--inference-device",getattr(a,"inference_device","cpu"),"--log-dir",str(session/"runner"),"--status-file",str(session/"runner_status.json")]+vr_args+["--motor-kp-scale",a.motor_kp_scale,"--motor-kd-scale",a.motor_kd_scale])
         if a.viewer:
             window=spawn("viewer",[sys.executable,"-u","-m","blinkmimic.deploy.final_view","--session",str(session),
                 "--gl-renderer",a.gl_renderer,"--render-hz",str(a.render_hz)])

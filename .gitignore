@@ -29,3 +29,5 @@ results/
 
 /scripts/deploy/bridge/g1_sim_bridge
 /scripts/deploy/bridge/libg1sim_client.so
+
+/scripts/deploy/bridge/g1_release_mode

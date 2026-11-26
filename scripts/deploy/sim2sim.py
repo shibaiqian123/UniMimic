@@ -147,6 +147,9 @@ def view(job,speed,render_hz=30.):
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--motor-kp-scale",default="")
+    ap.add_argument("--motor-kd-scale",default="")
+    ap.add_argument("--stationary-lower-body",action="store_true")
     ap.add_argument("--vr-host",help="SONIC streamer host; final live VR mode")
     ap.add_argument("--vr-port",type=int,default=5556)
     ap.add_argument("--vr-feedback-port",type=int,default=5557)
@@ -190,6 +193,8 @@ def main():
     ap.add_argument("--duration",type=float,help="final wall-clock duration, then request stop")
     ap.add_argument("--dds-domain",type=int,choices=[1,2],default=1)
     a=ap.parse_args()
+    if a.cmd!="final" and (a.motor_kp_scale or a.motor_kd_scale or a.stationary_lower_body):
+        ap.error("motor gain overrides and stationary-lower-body require --cmd final")
     if not np.isfinite(a.render_hz) or not 1<=a.render_hz<=120:ap.error("--render-hz must be in [1,120]")
     if a.vr_host and (a.cmd!="final" or a.auto or not a.planner_model):
         ap.error("live VR requires --cmd final --planner-model; --auto is for recorded clips only")

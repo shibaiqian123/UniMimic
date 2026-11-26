@@ -7,12 +7,16 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("target",choices=["sim","real"])
     p.add_argument("--bundle",type=Path,required=True)
+    p.add_argument("--motor-kp-scale",default="")
+    p.add_argument("--motor-kd-scale",default="")
+    p.add_argument("--stationary-lower-body",action="store_true")
     p.add_argument("--groot-root",type=Path,required=True,help="existing GR00T install; used only for planner asset")
     p.add_argument("--vr-host",default="127.0.0.1")
     p.add_argument("--vr-port",type=int,default=5556)
     p.add_argument("--feedback-port",type=int,default=5557)
     p.add_argument("--reference-port",type=int,default=5558)
     p.add_argument("--unitree-xml",type=Path)
+    p.add_argument("--stage",choices=["air","feet","slack","ground"],default="ground")
     p.add_argument("--iface",help="real robot NIC; required only for real")
     p.add_argument("--hardware-profile",type=Path)
     p.add_argument("--viewer",action="store_true")
@@ -32,7 +36,9 @@ def main():
              "--unitree-xml",str(a.unitree_xml),"--vr-host",a.vr_host,"--vr-port",str(a.vr_port),
              "--vr-feedback-port",str(a.feedback_port),"--vr-reference-port",str(a.reference_port),
              "--planner-model",str(planner),"--dds-domain",str(a.dds_domain),"--out",str(a.out),
-             "--inference-device",a.inference_device]
+             "--inference-device",a.inference_device,"--stage",a.stage,
+             "--motor-kp-scale",a.motor_kp_scale,"--motor-kd-scale",a.motor_kd_scale]
+        if a.stationary_lower_body:cmd+=["--stationary-lower-body"]
         if a.viewer:cmd+=["--viewer","--gl-renderer",a.gl_renderer]
         if a.duration is not None:cmd+=["--duration",str(a.duration)]
         raise SystemExit(subprocess.call(cmd,cwd=ROOT,env=env))
@@ -44,10 +50,11 @@ def main():
     source=subprocess.Popen([sys.executable,"-u","-m","blinkmimic.deploy.sonic_source",
         "--bundle",str(a.bundle),"--planner-model",str(planner),"--vr-endpoint",f"tcp://{a.vr_host}:{a.vr_port}",
         "--feedback-endpoint",f"tcp://127.0.0.1:{a.feedback_port}",
-        "--reference-bind",f"tcp://127.0.0.1:{a.reference_port}","--record",str(out/"vr_packets.msgpack")],
+        "--reference-bind",f"tcp://127.0.0.1:{a.reference_port}","--record",str(out/"vr_packets.msgpack")]+(["--stationary-lower-body"] if a.stationary_lower_body else []),
         cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT)
     cmd=[sys.executable,"-u",str(ROOT/"scripts/deploy/run_g1.py"),"--bundle",str(a.bundle),
-         "--iface",a.iface,"--domain","0","--stage","ground",
+         "--iface",a.iface,"--domain","0","--stage",a.stage,
+         "--motor-kp-scale",a.motor_kp_scale,"--motor-kd-scale",a.motor_kd_scale,
          "--vr-reference",f"tcp://127.0.0.1:{a.reference_port}","--vr-feedback-bind",f"tcp://*:{a.feedback_port}",
          "--inference-device",a.inference_device,"--log-dir",str(out/"runner")]
     if a.hardware_profile:cmd+=["--hardware-profile",str(a.hardware_profile)]
