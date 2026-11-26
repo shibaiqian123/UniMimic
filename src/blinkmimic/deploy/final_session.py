@@ -27,9 +27,10 @@ def run(a):
         check=subprocess.run(["chrt","-r",str(priority),"true"],capture_output=True,text=True)
         if check.returncode:raise RuntimeError("SCHED_RR permission unavailable; grant this shell RLIMIT_RTPRIO first: "+check.stderr.strip())
     plan=affinity_plan() if getattr(a,"runtime_affinity","auto")=="auto" else {}
+    live=bool(getattr(a,"vr_host",None))
     b=Bundle(a.bundle)
     session=new_session(a.out.resolve())
-    meta=dict(modality=getattr(a,"modality","motion"),kind="blink_final_sim",coordinated_start=True,domain=a.dds_domain,iface="lo",bundle=str(a.bundle.resolve()),
+    meta=dict(live_vr=live,modality=getattr(a,"modality","motion"),kind="blink_final_sim",coordinated_start=True,domain=a.dds_domain,iface="lo",bundle=str(a.bundle.resolve()),
               bundle_fingerprint=b.fingerprint,unitree_xml=str(a.unitree_xml.resolve()),
               inference_device=getattr(a,"inference_device","cpu"),rt_priority=priority,runtime_affinity=plan,stage=a.stage,sensor_profile=DEFAULT_PROFILE,physics_hz=1000,lowstate_hz=1000,
               lowcmd_hz=500,policy_hz=50,auto=a.auto)
@@ -51,7 +52,7 @@ def run(a):
     old={}
     for sig in (signal.SIGINT,signal.SIGTERM):
         old[sig]=signal.signal(sig,lambda *_:terminate.__setitem__(0,True))
-    physics=bridge=runner=window=None;seen=set();failure="";stop_sent=False;stop_at=None
+    physics=bridge=runner=window=source=None;seen=set();failure="";stop_sent=False;stop_at=None
     since=time.monotonic();state_since=since;previous=None;last_action=0.;policy_support=False
     auto_events=[];post_support_since=None
     try:
@@ -61,9 +62,19 @@ def run(a):
             if physics.poll() is not None or time.monotonic()>deadline:raise RuntimeError("physics startup failed; see physics.log")
             time.sleep(.05)
         bridge=spawn("sim_bridge",[str(BRIDGE/"g1_sim_bridge"),str(session/"sim.mmap"),str(a.dds_domain)])
+        vr_args=[]
+        if live:
+            source=spawn("vr_source",[sys.executable,"-u","-m","blinkmimic.deploy.sonic_source",
+                "--bundle",str(a.bundle.resolve()),"--planner-model",str(a.planner_model.resolve()),
+                "--vr-endpoint",f"tcp://{a.vr_host}:{a.vr_port}",
+                "--feedback-endpoint",f"tcp://127.0.0.1:{a.vr_feedback_port}",
+                "--reference-bind",f"tcp://127.0.0.1:{a.vr_reference_port}",
+                "--record",str(session/"vr_packets.msgpack")])
+            vr_args=["--vr-reference",f"tcp://127.0.0.1:{a.vr_reference_port}",
+                     "--vr-feedback-bind",f"tcp://*:{a.vr_feedback_port}"]
         runner=spawn("runner",[sys.executable,"-u",str(ROOT/"scripts/deploy/run_g1.py"),
             "--bundle",str(a.bundle.resolve()),"--iface","lo","--domain",str(a.dds_domain),"--sim",
-            "--stage",a.stage,"--modality",getattr(a,"modality","motion"),"--inference-device",getattr(a,"inference_device","cpu"),"--log-dir",str(session/"runner"),"--status-file",str(session/"runner_status.json")])
+            "--stage",a.stage,"--modality",getattr(a,"modality","motion"),"--inference-device",getattr(a,"inference_device","cpu"),"--log-dir",str(session/"runner"),"--status-file",str(session/"runner_status.json")]+vr_args)
         if a.viewer:
             window=spawn("viewer",[sys.executable,"-u","-m","blinkmimic.deploy.final_view","--session",str(session),
                 "--gl-renderer",a.gl_renderer,"--render-hz",str(a.render_hz)])
@@ -85,6 +96,9 @@ def run(a):
                 print(f"{state}: {rs.get('reason') or rs.get('reject_reason','')}",flush=True)
                 previous=state;state_since=now;seen.add(state)
             if state=="POLICY" and ps.get("support"):policy_support=True
+            if source is not None and source.poll() is not None:
+                failure="VR source exited; see vr_source.log"
+                send(session,dict(type="key",key="D"));stop_sent=True;stop_at=stop_at or now
             if a.auto and not stop_sent and now-last_action>.4:
                 key=None
                 if state=="PASSIVE":key="1"
@@ -104,7 +118,7 @@ def run(a):
             if state=="DAMP":
                 stop_sent=True;stop_at=stop_at or now
                 reason=rs.get("reason","")
-                if reason!="remote stop" and reason!="operator exit":failure=reason
+                if reason not in ("remote stop","operator exit","SONIC remote stop"):failure=reason
             request_stop=terminate[0] or (a.duration is not None and now-since>=a.duration)
             if window is not None and window.poll() is not None:
                 request_stop=True
@@ -135,7 +149,7 @@ def run(a):
         except OSError:pass
     finally:
         if runner is not None and runner.poll() is None:stop_process(runner,12)
-        stop_process(bridge);stop_process(window)
+        stop_process(source);stop_process(bridge);stop_process(window)
         try:send(session,dict(type="quit"))
         except OSError:pass
         if physics is not None:
@@ -145,6 +159,15 @@ def run(a):
         for f in files:f.close()
         for sig,handler in old.items():signal.signal(sig,handler)
     rs=read(session/"runner_status.json");pr=read(session/"physics_report.json")
+    if live:
+        report=dict(session=str(session),scope="live SONIC input / BlinkMimic policy / simulated LowState",
+                    states=sorted(seen),reason=failure or rs.get("reason",""),physics=pr,
+                    hardware_verified=False,tracking_validation="not scored against the bundled recorded motion",
+                    source_recording=str(session/"vr_packets.msgpack"),runner_log_dir=rs.get("log_dir"))
+        atomic_json(session/"report.json",report)
+        print(json.dumps(report,indent=2),flush=True)
+        if failure:raise SystemExit(1)
+        return
     completed="STANDBY_POST" in seen
     required={"PASSIVE","INTERP","HOLD","STANDBY_PRE","POLICY","STANDBY_POST","DAMP"}
     flow=completed and required.issubset(seen) and not failure and not policy_support

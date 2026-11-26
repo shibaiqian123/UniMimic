@@ -147,6 +147,11 @@ def view(job,speed,render_hz=30.):
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--vr-host",help="SONIC streamer host; final live VR mode")
+    ap.add_argument("--vr-port",type=int,default=5556)
+    ap.add_argument("--vr-feedback-port",type=int,default=5557)
+    ap.add_argument("--vr-reference-port",type=int,default=5558)
+    ap.add_argument("--planner-model",type=Path)
     ap.add_argument("--modality",choices=["motion","smpl","teleop"],default="motion")
     ap.add_argument("--bundle",type=Path,required=True)
     ap.add_argument("--cmd",choices=["g1","g2","standby","sweep","compare","timing","final"],default="g2")
@@ -186,6 +191,8 @@ def main():
     ap.add_argument("--dds-domain",type=int,choices=[1,2],default=1)
     a=ap.parse_args()
     if not np.isfinite(a.render_hz) or not 1<=a.render_hz<=120:ap.error("--render-hz must be in [1,120]")
+    if a.vr_host and (a.cmd!="final" or a.auto or not a.planner_model):
+        ap.error("live VR requires --cmd final --planner-model; --auto is for recorded clips only")
     if a.cmd=="final":
         if a.backend!="cpu":ap.error("final uses CPU official model; GPU modes remain diagnostic")
         if a.max_seconds is not None:ap.error("final uses --duration in wall-clock seconds")

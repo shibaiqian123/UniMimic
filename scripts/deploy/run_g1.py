@@ -25,6 +25,8 @@ def main():
     ap.add_argument("--logger-cpus",default=os.environ.get("BLINK_LOG_CPUS"))
     ap.add_argument("--bridge-cpus",default=os.environ.get("BLINK_BRIDGE_CPUS"))
     ap.add_argument("--modality",choices=["motion","smpl","teleop"],default="motion")
+    ap.add_argument("--vr-reference", help="live SONIC reference endpoint; enables VR controller")
+    ap.add_argument("--vr-feedback-bind", default="tcp://*:5557")
     ap.add_argument("--bundle",type=Path,required=True)
     ap.add_argument("--hardware-profile",type=Path,help="optional IMU transform overrides")
     ap.add_argument("--iface",required=True)
@@ -48,7 +50,14 @@ def main():
     if a.hardware_profile:profile.update(json.loads(a.hardware_profile.read_text()))
     profile.pop("verified_on_this_robot",None)
     policy=OnnxPolicy(b,a.inference_device,a.modality)
-    ctl=Controller(b,profile,a.stage,policy=policy)
+    client=None
+    if a.vr_reference:
+        from blinkmimic.deploy.sonic_control import ReferenceClient,LiveController
+        client=ReferenceClient(a.vr_reference,a.vr_feedback_bind)
+        ctl=LiveController(b,profile,a.stage,client,a.inference_device)
+        policy.info["input"]="SONIC live ZMQ"
+    else:
+        ctl=Controller(b,profile,a.stage,policy=policy)
     print("Inference: "+json.dumps(policy.info),flush=True)
     if a.inject_fault:
         original=ctl.core.policy
@@ -176,9 +185,11 @@ def main():
                                           wake_lateness_ms=wake_lateness_ms,previous_enqueue_ms=previous_enqueue_ms,
                                           policy_inference_thread_cpu_ms=inference_cpu_ms,
                                           sample_age_before_control_ms=(controller_started-s["t_rx"])*1000))
+            if client and out is not None:client.feedback(s,out)
             if a.status_file:
                 log.status(a.status_file,dict(t=now,state=ctl.state,frame=ctl.core.frame,phase=ctl.core.phase,
                     reason=ctl.reason,reject_reason=ctl.reject_reason,keys=s["keys"],
+                    live_mode=getattr(ctl,"live_mode",None),live_visual=getattr(ctl.core,"visual",{}),
                     heading=ctl.core.heading.tolist() if ctl.core.heading is not None else None,log_dir=str(a.log_dir)))
             if out is not None:previous_enqueue_ms=(time.monotonic()-enqueue_started)*1000
             if ctl.state=="DAMP":
@@ -210,6 +221,7 @@ def main():
         raise
     finally:
         bridge.quit()
+        if client:client.close()
         log.write(dict(event="end",t=time.monotonic(),state=ctl.state,frame=ctl.core.frame,reason=ctl.reason))
         log.close()
         if gc_was_enabled:gc.enable()

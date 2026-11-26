@@ -50,6 +50,7 @@ def main():
     window_input=WindowInput(send)
     def key_cb(window,key,scan,action,mods):
         if action!=glfw.PRESS:return # ignore OS repeat events
+        if meta.get("live_vr") and key in (glfw.KEY_1,glfw.KEY_2,glfw.KEY_3):return
         if window_input.key(key,action):
             flags["last_key"]=chr(key)
         elif key==glfw.KEY_G:flags["ghost"]=not flags["ghost"]
@@ -84,7 +85,7 @@ def main():
             if flags["follow"]:cam.lookat[:]=d.qpos[fq:fq+3]
             mujoco.mjv_updateScene(m,d,opt,None,cam,mujoco.mjtCatBit.mjCAT_ALL,scene)
             frame=min(int(rs.get("frame",0)),b.T-1)
-            if flags["ghost"]:
+            if flags["ghost"] and not meta.get("live_vr"):
                 origin=np.array(read(a.session/"plant.json").get("initial_root",b.motion["root_p"][0]))
                 heading=np.array(rs.get("heading") or np.eye(3))
                 ref.qpos[:]=d.qpos
@@ -99,6 +100,32 @@ def main():
                     g=scene.geoms[scene.ngeom]
                     mujoco.mjv_initGeom(g,mujoco.mjtGeom.mjGEOM_CAPSULE,[.012,0,0],[0,0,0],np.eye(3).reshape(9),[.1,.7,1,.7])
                     mujoco.mjv_connector(g,mujoco.mjtGeom.mjGEOM_CAPSULE,.012,x,y);scene.ngeom+=1
+            if flags["ghost"] and meta.get("live_vr"):
+                visual=rs.get("live_visual",{})
+                RR=np.asarray(visual.get("reference_R",np.eye(3)))
+                origin=d.qpos[fq:fq+3]
+                def line(x,y,color,width=.009):
+                    if scene.ngeom>=scene.maxgeom or np.linalg.norm(y-x)<1e-8:return
+                    g=scene.geoms[scene.ngeom]
+                    mujoco.mjv_initGeom(g,mujoco.mjtGeom.mjGEOM_CAPSULE,[width,0,0],[0,0,0],np.eye(3).reshape(9),color)
+                    mujoco.mjv_connector(g,mujoco.mjtGeom.mjGEOM_CAPSULE,width,x,y);scene.ngeom+=1
+                if "smpl_local" in visual:
+                    points=np.asarray(visual["smpl_local"])@RR.T+origin
+                    parents=[-1,0,0,0,1,2,3,4,5,6,7,8,9,9,9,12,13,14,16,17,18,19,20,21]
+                    for i,parent in enumerate(parents):
+                        if parent>=0:line(points[parent],points[i],[.95,.55,.1,.9])
+                if "vr_position" in visual:
+                    points=np.asarray(visual["vr_position"])@RR.T+origin
+                    rotations=np.asarray(visual["vr_rotation"])
+                    for point,rot in zip(points,rotations):
+                        for axis,color in enumerate(([1,0,0,1],[0,1,0,1],[0,.5,1,1])):
+                            line(point,point+.12*(RR@rot)[:,axis],color)
+                if "reference_q" in visual:
+                    ref.qpos[:]=d.qpos;ref.qpos[qidx]=visual["reference_q"]
+                    mujoco.mju_mat2Quat(ref.qpos[fq+3:fq+7],RR.reshape(9));mujoco.mj_kinematics(m,ref)
+                    for i in range(1,m.nbody):
+                        parent=m.body_parentid[i]
+                        if parent:line(ref.xpos[parent],ref.xpos[i],[.1,.7,1,.7])
             w,h=glfw.get_framebuffer_size(win);viewport=mujoco.MjrRect(0,0,w,h)
             mujoco.mjr_render(viewport,scene,context)
             text=(f"FINAL SIM / CPU official G1 / real runner via DDS domain {meta['domain']}\n"
@@ -109,6 +136,14 @@ def main():
                   f"{rs.get('reason') or rs.get('reject_reason','')}\n"
                   "1 prepare | 2 standby | 3 play | D stop | B support\n"
                   "G reference | F camera | no pause/step in FINAL mode")
+            if meta.get("live_vr"):
+                text=(f"LIVE VR / CPU G1 / shared LowState runner / domain {meta['domain']}\n"
+                      f"State: {rs.get('state','WAITING')} | Mode: {rs.get('live_mode','OFF')} | sim {s['sim_time']:.2f}s\n"
+                      f"Support: {bool(s['support'])} | pose window delay: 180ms\n"
+                      f"{rs.get('reason') or rs.get('reject_reason','')}\n"
+                      "PICO: ABXY prepare/stop | AX POSE | Left-stick click VR_3PT\n"
+                      "B simulation support | D stop | G live references | F camera\n"
+                      "Orange: SMPL | RGB axes: calibrated three points | Blue: planner")
             mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_NORMAL,mujoco.mjtGridPos.mjGRID_TOPLEFT,viewport,text,"",context)
             glfw.swap_buffers(win);frames+=1
             if a.frames and frames>=a.frames:break

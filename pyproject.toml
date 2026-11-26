@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 omni = ["joblib>=1.4"]
+teleop = ["pyzmq>=25", "msgpack>=1", "scipy>=1.10", "onnxruntime>=1.20"]
 
 [tool.uv]
 required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
