@@ -11,7 +11,7 @@ def commands(a):
     root = a.groot_root.resolve()
     stream = [str(root / ".venv_teleop/bin/python"),
               "gear_sonic/scripts/pico_manager_thread_server.py",
-              "--input-source", "xrt", "--manager", "--num_frames_to_send", "1",
+              "--input-source", "xrt", "--manager", "--num_frames_to_send", "5",
               "--port", str(a.port),
               "--zmq_feedback_host", a.feedback_host,
               "--zmq_feedback_port", str(a.feedback_port)]

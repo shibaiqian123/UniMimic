@@ -7,7 +7,7 @@ import numpy as np
 import zmq,msgpack
 from .core import Bundle
 from .sonic_wire import unpack,ISAAC_NAMES
-from .sonic_planner import Planner,initial_context,sample_qpos,planner_window
+from .sonic_planner import Planner,initial_context,sample_qpos,planner_window,blend_plan
 
 def aslist(x):
     if isinstance(x,np.ndarray):return x.tolist()
@@ -19,7 +19,7 @@ class Source:
         self.pose={};self.pose_time=0.;self.last_frame=-1;self.packet_ids=[]
         self.plan={};self.plan_time=0.;self.error=""
         self.epoch=0;self.heading_delta=0.;self.pose_interval=0.;self.pose_packets=0
-        self.sensor_time=None
+        self.sensor_time=None;self.pose_cursor=-1
     def accept(self,topic,x,now):
         if topic=="command":
             stop=bool(x.get("stop",[0])[0]);start=bool(x.get("start",[0])[0])
@@ -29,6 +29,7 @@ class Source:
             pm=bool(x.get("planner",[1])[0])
             if pm!=self.planner_mode:
                 self.epoch+=1;self.pose.clear();self.sensor_time=None;self.packet_ids=[];self.last_frame=-1;self.pose_time=0.;self.plan_time=0.
+            if pm!=self.planner_mode:self.pose_cursor=-1
             self.planner_mode=pm;self.command_time=now
             if "delta_heading" in x:self.heading_delta=float(x["delta_heading"][0])
         elif topic=="planner":
@@ -56,19 +57,22 @@ class Source:
             self.heading_delta+=float(np.asarray(x.get("heading_increment",[0.])).reshape(-1)[0])
             self.last_frame=int(ids[-1]);self.pose_time=now;self.packet_ids=[int(k) for k in ids][-10:]
             self.pose={k:v for k,v in self.pose.items() if k>=self.last_frame-64}
-    def pose_window(self):
-        # Fixed-size encoder input is not a requirement to wait for ten live samples.
-        # Use the latest received ordered window, holding its endpoint for missing future frames.
-        # Never renew freshness for padding: pose_time remains the last real packet time.
+    def pose_window(self, now=None):
+        # Keep actual consecutive frames. A bounded nine-frame lookahead delay
+        # makes the window chronological; these are not past frames labelled as future.
         if not self.packet_ids:return None
-        ids=self.packet_ids
-        if any(b!=a+1 for a,b in zip(ids,ids[1:])):
-            ids=[ids[-1]]  # no interpolation across dropped source frames
-        ids=ids+[ids[-1]]*(10-len(ids))
+        now=self.pose_time if now is None else now
+        first=self.last_frame
+        while first-1 in self.pose and self.last_frame-first<9:first-=1
+        frame=min(self.last_frame,first+max(0,int((now-self.pose_time)*50+1e-6)))
+        frame=max(frame,self.pose_cursor);self.pose_cursor=frame
+        ids=list(range(frame,self.last_frame+1))[:10]
+        real=len(ids);ids += [ids[-1]]*(10-real)
         values=[self.pose[k] for k in ids]
         return dict(smpl=np.stack([v[0] for v in values]),quat=np.stack([v[1] for v in values]),
                     joints=np.stack([v[2] for v in values]),frame=int(ids[0]),
-                    padded_frames=10-len(self.packet_ids) if len(set(ids))>1 else 9)
+                    padded_frames=10-real,lookahead_delay_s=(self.last_frame-frame)/50)
+
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -96,6 +100,7 @@ def main():
     pending=None;pending_start=0.
     stopping=[False]
     for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:stopping.__setitem__(0,True))
+    if a.stationary_lower_body:print("STATIONARY LOWER BODY: joystick movement/turn commands are ignored; POSE remains full body.",flush=True)
     print("SONIC VR source ready: "+a.vr_endpoint,flush=True)
     try:
         while not stopping[0]:
@@ -113,7 +118,9 @@ def main():
                 fp.write(msgpack.packb(dict(t=now,feedback=packet),use_bin_type=True))
             except zmq.Again:pass
             if pending is not None and pending.done():
-                try:seq,ms=pending.result();seq_start=pending_start
+                try:
+                    new,ms=pending.result()
+                    seq=blend_plan(seq,seq_start,new,pending_start);seq_start=pending_start
                 except Exception as e:source.error="planner: "+str(e);source.stop+=1
                 pending=None
             if pending is None and now-last_plan>=.1:
@@ -124,7 +131,7 @@ def main():
                 if a.stationary_lower_body:command={}
                 pending=executor.submit(planner.generate,context,command);last_plan=now
             qpos,qd=planner_window(seq,seq_start,now)
-            window=source.pose_window()
+            window=source.pose_window(now)
             mode=("VR_3PT" if "vr_position" in source.plan else
                   "PLANNER_FROZEN_UPPER" if "upper_body_position" in source.plan else "PLANNER") if source.planner_mode else "POSE"
             requested_mode=mode
@@ -136,7 +143,7 @@ def main():
                 isaac_joint_names=ISAAC_NAMES,heading_delta=source.heading_delta,
                 stationary_lower_body=a.stationary_lower_body,pose_packets=source.pose_packets,
                 pose_received_time=source.pose_time,pose_sensor_time=source.sensor_time,pose_interval_s=source.pose_interval,
-                pose_padded_frames=window["padded_frames"] if window else 0,pose_delay_s=0.,pose_window_policy="latest_packet_endpoint_hold")
+                pose_padded_frames=window["padded_frames"] if window else 0,pose_delay_s=window["lookahead_delay_s"] if window else 0.,pose_window_policy="buffered_50hz_lookahead_endpoint_hold")
             pub.send(b"reference"+json.dumps(payload,default=aslist,separators=(",",":")).encode(),zmq.NOBLOCK)
             time.sleep(max(0.,.02-(time.monotonic()-now)))
     finally:

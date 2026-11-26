@@ -43,8 +43,8 @@ def main():
                 if not (phase==4 and a.disconnect):pub.send(pack("command",command))
             if phase==4 and a.disconnect:time.sleep(.02);continue
             if phase==1:
-                n=1;ids=np.array([frame],dtype=np.int64);frame+=1
-                # One frame per 20ms, matching the low-latency PICO sender.
+                n=5;ids=np.arange(frame,frame+n,dtype=np.int64);frame+=n
+                # Five 50Hz samples per packet, matching the restored PICO sender.
                 pub.send(pack("pose",dict(frame_index=ids,smpl_joints=np.tile(r[67:139].reshape(24,3),(n,1,1)).astype(np.float32),
                      body_quat_w=np.tile(quat,(n,1)).astype(np.float32),joint_pos=np.tile(q,(n,1)).astype(np.float32))))
             else:
@@ -53,7 +53,7 @@ def main():
                 if phase==3:
                     fields.update(vr_position=r[148:157].astype(np.float32),vr_orientation=pointq.astype(np.float32).reshape(-1))
                 pub.send(pack("planner",fields))
-            time.sleep(.02)
+            time.sleep(.1 if phase==1 else .02)
         if proc.poll() is None:proc.terminate()
         code=proc.wait(timeout=20)
         sessions=list((a.out/"sessions").glob("*"));report=json.loads((sessions[0]/"report.json").read_text()) if sessions else {}

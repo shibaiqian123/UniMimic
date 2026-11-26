@@ -26,7 +26,7 @@ def test_pose_window_and_freshness():
     assert s.pose_window()["frame"]==0
     assert s.pose_window()["smpl"].shape==(10,24,3)
     s.accept("pose",pose(range(3,10)),2.)
-    assert s.pose_window()["frame"]==3
+    assert s.pose_window()["frame"]==0
     s.accept("pose",pose(range(3,10)),3.)
     assert s.pose_time==2.
     s.accept("command",dict(planner=[0]),3.)
@@ -66,3 +66,39 @@ def test_single_frame_padding_does_not_hide_dropout():
     s.accept("pose",x,9.)
     assert s.pose_time==1.
     assert s.pose_window()["frame"]==42
+
+def test_buffered_window_advances_without_rewinding_and_expires():
+    s=Source();x=pose(range(5));x["smpl_joints"][:,0,0]=np.arange(5)
+    s.accept("pose",x,1.)
+    assert s.pose_window(1.)["padded_frames"]==5
+    assert s.pose_window(1.08)["frame"]==4
+    s.accept("pose",pose(range(5,10)),1.1)
+    assert s.pose_window(1.1)["frame"]==4
+    s.accept("pose",pose(range(10,15)),1.2)
+    assert s.pose_window(1.2)["frame"]==5
+    assert s.pose_window(2.)["padded_frames"]==9
+    assert s.pose_time==1.2
+    s.accept("command",dict(planner=[0]),2.)
+    assert s.pose_window(2.) is None
+
+def test_plan_blending_same_timeline_and_quaternion():
+    from blinkmimic.deploy.sonic_planner import blend_plan
+    old=np.zeros((50,36),np.float32);old[:,3]=1;old[:,7]=np.arange(50)
+    new=old.copy();new[:,3]=-1;new[:,7]=100
+    out=blend_plan(old,1.,new,1.1)
+    np.testing.assert_allclose(out[0,7],5)
+    np.testing.assert_allclose(out[8:,7],100)
+    np.testing.assert_allclose(np.linalg.norm(out[:,3:7],axis=1),1)
+    np.testing.assert_allclose(abs(out[:,3]),1)
+
+def test_mode_transition_both_directions_and_interrupted_switch():
+    from blinkmimic.deploy.sonic_control import ModeTransition
+    t=ModeTransition();t.last=np.zeros(29)
+    out,w=t.apply(np.ones(29),"POSE",1.)
+    np.testing.assert_array_equal(out,0);assert w==0
+    out,w=t.apply(np.ones(29),"POSE",1.25)
+    np.testing.assert_allclose(out,.5)
+    out,w=t.apply(-np.ones(29),"PLANNER",1.3)
+    np.testing.assert_allclose(out,.5);assert w==0
+    out,w=t.apply(-np.ones(29),"PLANNER",1.8)
+    np.testing.assert_allclose(out,-1);assert w==1

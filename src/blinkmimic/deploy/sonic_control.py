@@ -80,6 +80,7 @@ class LiveCore(DeployCore):
                     inference_ms=ms,inference_thread_cpu_ms=cpu_ms,modality=modality,live_mode=self.live_mode,
                     reference_R=ref,features=x,pose_interval_s=self.message.get("pose_interval_s",0.),
                     pose_padded_frames=self.message.get("pose_padded_frames",0),
+                    pose_delay_s=self.message.get("pose_delay_s",0.),
                     pose_received_time=self.message.get("pose_received_time",0.),
                     pose_sensor_time=self.message.get("pose_sensor_time"),
                     switch_wait_s=self.message.get("switch_wait_s",0.),requested_mode=self.message.get("requested_mode"),source_age_s=time.monotonic()-self.message["source_time"])
@@ -110,13 +111,28 @@ class ReferenceClient:
     def close(self):
         self.sub.close(0);self.pub.close(0);self.ctx.term()
 
+class ModeTransition:
+    """Blend a mode's target from the last sent target; never alter raw action history."""
+    def __init__(self,duration=.5):
+        self.duration=duration;self.mode=None;self.last=None;self.seed=None;self.since=0.
+    def apply(self,target,mode,now):
+        target=np.asarray(target,float)
+        if mode!=self.mode:
+            self.seed=target.copy() if self.last is None else self.last.copy()
+            self.since=now;self.mode=mode
+        u=np.clip((now-self.since)/self.duration,0.,1.)
+        weight=float(u*u*(3-2*u))
+        out=self.seed*(1-weight)+target*weight
+        self.last=out.copy()
+        return out,weight
+
 class LiveController(Controller):
     def __init__(self,bundle,profile,stage,client,device="cpu"):
         policies={m:OnnxPolicy(bundle,device,m) for m in ("motion","smpl","teleop")}
         super().__init__(bundle,profile,stage,policies["motion"])
         if bundle.cfg["schema"]!="blinkmimic_single_motion_v4":raise ValueError("VR requires trained omni v4 bundle")
         self.core=LiveCore(bundle,policies);self.client=client;self.starts=0;self.stops=0
-        self.live_timeout=1.;self.live_mode="OFF"
+        self.live_timeout=1.;self.live_mode="OFF";self.target_transition=ModeTransition()
     def update(self,s,now,bridge_fault=None):
         message=self.client.poll()
         if s["keys"]&STOP==STOP:self.damp("remote stop")
@@ -157,9 +173,13 @@ class LiveController(Controller):
                 tilt=float(np.arccos(np.clip(np.dot(R[2],ref[2]),-1,1)))
                 if tilt>self.limits["policy_tilt"]:raise ValueError("reference tilt error")
                 if abs(out["action"]).max()>self.stage["max_action"]:raise ValueError("action magnitude")
-                target=out["target"];kp=self.b.kp;kd=self.b.kd
+                raw_target=out["target"].copy()
+                target,weight=self.target_transition.apply(raw_target,message["mode"],now)
+                out.update(raw_policy_target=raw_target,transition_weight=weight,transition_duration_s=self.target_transition.duration)
+                kp=self.b.kp;kd=self.b.kd
             requested=np.array(target,copy=True)
             target,n=limit_target(target,s["q"],s["dq"],self.b,self.stage,kp,kd)
+            self.target_transition.last=np.array(target,copy=True)
             self.live_mode=message["mode"]
             out.update(target=target,kp=kp,kd=kd,n_clamped=n,state=self.state,live_mode=self.live_mode,
                        reject_reason=self.reject_reason,requested_target=requested,

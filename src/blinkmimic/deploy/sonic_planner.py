@@ -50,3 +50,18 @@ def planner_window(seq,start,now):
     x=sample_qpos(seq,frame+np.arange(46))
     nxt=sample_qpos(seq,frame+np.arange(46)+1)
     return x,(nxt[:,7:]-x[:,7:])*50
+
+def blend_plan(old, old_start, new, new_start, frames=8):
+    """Cross-fade overlapping references on the same 50Hz timeline.
+    First sample remains the old trajectory; quaternion interpolation is shortest-path.
+    """
+    old_aligned=sample_qpos(old,(new_start-old_start)*50+np.arange(len(new)))
+    out=np.asarray(new,dtype=np.float32).copy()
+    n=min(frames+1,len(out))
+    w=np.minimum(np.arange(n)/max(frames,1),1.)
+    out[:n]=old_aligned[:n]*(1-w[:,None])+out[:n]*w[:,None]
+    for i in range(n):
+        quats=np.stack((old_aligned[i,3:7],new[i,3:7]))
+        rot=Rotation.from_quat(quats[:,[1,2,3,0]])
+        out[i,3:7]=Slerp([0,1],rot)([w[i]]).as_quat()[0,[3,0,1,2]]
+    return out
