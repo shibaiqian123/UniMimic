@@ -31,3 +31,12 @@ results/
 /scripts/deploy/bridge/libg1sim_client.so
 
 /scripts/deploy/bridge/g1_release_mode
+
+# Local configuration and external model artifacts
+.env
+.env.*
+!.env.example
+*.onnx
+*.safetensors
+*.msgpack
+.venv_*/

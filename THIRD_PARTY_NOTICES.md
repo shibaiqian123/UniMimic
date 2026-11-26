@@ -79,7 +79,9 @@ The scalar bounding/rounding formula in src/blinkmimic/latent.py follows lucidra
 The omni modules independently implement feature formulas and standard non-compliance
 loss semantics described by NVIDIA GR00T-WholeBodyControl, commit
 2f07b35b3f3b9053b1f4fd2adeaf56b6bce32366:
-https://github.com/NVlabs/GR00T-WholeBodyControl/tree/2f07b35b3f3b9053b1f4fd2adeaf56b6bce32366
+https://github.com/NVlabs/GR00T-WholeBodyControl
+
+The SHA above identifies the author's local reference checkout; availability from the official remote has not been established. It is not a claim that the local fork is an unmodified official release.
 
 Reference files: gear_sonic/envs/manager_env/mdp/{commands,observations}.py,
 gear_sonic/isaac_utils/rotations.py, gear_sonic/trl/losses/token_losses.py,
@@ -91,3 +93,10 @@ Upstream source notice reproduced in licenses/SONIC-source-NOTICE.txt.
 No upstream pretrained weights are included. BlinkMimic adaptations retain its
 world-model optimizer, RobotSpec joint order, independent running normalizers,
 and its action-decoder architecture; these are not an exact SONIC PPO reproduction.
+
+
+## UniMimic provenance
+
+UniMimic was imported from https://github.com/fuyichen0725/blinkmimic and reinitialized as a new Git repository. Import commit ea61249 is a local identifier; the exact upstream SHA has not been recovered. Preserve the original LICENSE copyright lines. Original README and citation metadata are archived under docs/upstream.
+
+Live deployment reads external SONIC planner weights and PICO components from a user-provided GR00T checkout. No such weights are bundled here; source-code licensing does not grant redistribution rights to those assets. See docs/DATA_AND_ASSETS.md.

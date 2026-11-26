@@ -1,3 +1,5 @@
+> 本页包含开发阶段记录；当前能力与限制以 [PROJECT_STATUS](PROJECT_STATUS.md) 为准，可移植命令见 [GETTING_STARTED](GETTING_STARTED.md)。历史229/32路径仅用于追溯。
+
 # 64D Motion token / FSQ
 
 实现位置为229的 /home/cqu023/blinkmimic。旧32D checkpoint和v1部署包保持原行为；本轮不修改32、不自动启动长期训练或真机。

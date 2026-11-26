@@ -1,3 +1,5 @@
+> 本页包含开发阶段记录；当前能力与限制以 [PROJECT_STATUS](PROJECT_STATUS.md) 为准，可移植命令见 [GETTING_STARTED](GETTING_STARTED.md)。历史229/32路径仅用于追溯。
+
 # BlinkMimic omni: Motion / SMPL / Teleop
 
 Source work is on 229, branch `omni`. Sync commits with Git before running the commands on 32. No pretrained Motion policy is loaded. Resume is only for a matching omni experiment, with the same world size; replay is refilled, so resume is not bit-exact.

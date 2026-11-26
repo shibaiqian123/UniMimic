@@ -1,10 +1,10 @@
 cff-version: 1.2.0
-message: "If you use BlinkMimic, please cite it as below."
-title: "BlinkMimic: Whole-Body Motion Tracking for the Unitree G1 in Minutes on One GPU"
+message: "If you use UniMimic, cite this repository and the relevant upstream projects listed in README.md."
+title: "UniMimic: Multimodal Whole-Body Control Built on BlinkMimic"
+type: software
 authors:
-  - family-names: Chen
-    given-names: Fuyi
-version: 1.0.0
-date-released: 2026-11-02
-license: MIT
-repository-code: "https://github.com/fuyichen0725/blinkmimic"
+  - name: "shibaiqian123"
+    website: "https://github.com/shibaiqian123"
+repository-code: "https://github.com/shibaiqian123/UniMimic"
+url: "https://github.com/shibaiqian123/UniMimic"
+abstract: "Research extensions to BlinkMimic for FSQ64, paired multimodal training, and experimental Unitree G1 deployment."

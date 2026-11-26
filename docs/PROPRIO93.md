@@ -1,3 +1,5 @@
+> 本页包含开发阶段记录；当前能力与限制以 [PROJECT_STATUS](PROJECT_STATUS.md) 为准，可移植命令见 [GETTING_STARTED](GETTING_STARTED.md)。历史229/32路径仅用于追溯。
+
 # Proprio93 + future relative orientation
 
 本模式只改变Motion策略输入分工：encoder接收参考与相对朝向，控制decoder只接收本体历史和token。它不是SONIC所有特征/损失的完整复现；没有新增Human/SMPL/VR/VLA encoder。
