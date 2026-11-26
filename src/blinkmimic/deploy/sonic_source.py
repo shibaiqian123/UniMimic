@@ -16,7 +16,7 @@ def aslist(x):
 class Source:
     def __init__(self):
         self.start=0;self.stop=0;self.planner_mode=True;self.command_time=0.
-        self.pose={};self.pose_time=0.;self.last_frame=-1
+        self.pose={};self.pose_time=0.;self.last_frame=-1;self.packet_ids=[]
         self.plan={};self.plan_time=0.;self.error=""
         self.epoch=0
     def accept(self,topic,x,now):
@@ -27,7 +27,7 @@ class Source:
             elif start:self.start+=1
             pm=bool(x.get("planner",[1])[0])
             if pm!=self.planner_mode:
-                self.epoch+=1;self.pose.clear();self.last_frame=-1;self.pose_time=0.;self.plan_time=0.
+                self.epoch+=1;self.pose.clear();self.packet_ids=[];self.last_frame=-1;self.pose_time=0.;self.plan_time=0.
             self.planner_mode=pm;self.command_time=now
         elif topic=="planner":
             for key,shape in (("mode",(1,)),("movement",(3,)),("facing",(3,))):
@@ -43,13 +43,18 @@ class Source:
             if int(ids[-1])<=self.last_frame:return # no freshness renewal for duplicate/out-of-order frames
             for i,frame in enumerate(ids):
                 self.pose[int(frame)]=(x["smpl_joints"][i],x["body_quat_w"][i],x["joint_pos"][i])
-            self.last_frame=int(ids[-1]);self.pose_time=now
+            self.last_frame=int(ids[-1]);self.pose_time=now;self.packet_ids=[int(k) for k in ids][-10:]
             self.pose={k:v for k,v in self.pose.items() if k>=self.last_frame-64}
     def pose_window(self):
-        # 180 ms causal playout delay gives the trained current+9 future window.
-        ids=np.arange(self.last_frame-9,self.last_frame+1)
-        if not all(int(k) in self.pose for k in ids):return None
-        values=[self.pose[int(k)] for k in ids]
+        # Fixed-size encoder input is not a requirement to wait for ten live samples.
+        # Use the latest received ordered window, holding its endpoint for missing future frames.
+        # Never renew freshness for padding: pose_time remains the last real packet time.
+        if not self.packet_ids:return None
+        ids=self.packet_ids
+        if any(b!=a+1 for a,b in zip(ids,ids[1:])):
+            ids=[ids[-1]]  # no interpolation across dropped source frames
+        ids=ids+[ids[-1]]*(10-len(ids))
+        values=[self.pose[k] for k in ids]
         return dict(smpl=np.stack([v[0] for v in values]),quat=np.stack([v[1] for v in values]),
                     joints=np.stack([v[2] for v in values]),frame=int(ids[0]))
 
@@ -114,7 +119,7 @@ def main():
                 source_time=max(source.command_time,source.plan_time if source.planner_mode else source.pose_time),
                 plan_time=seq_start,plan_end=seq_start+(len(seq)-1)/50,planner_ms=ms,
                 qpos=qpos,qd=qd,pose=window,planner=source.plan,
-                isaac_joint_names=ISAAC_NAMES,pose_delay_s=.18)
+                isaac_joint_names=ISAAC_NAMES,pose_delay_s=0.,pose_window_policy="latest_packet_endpoint_hold")
             pub.send(b"reference"+json.dumps(payload,default=aslist,separators=(",",":")).encode(),zmq.NOBLOCK)
             time.sleep(max(0.,.02-(time.monotonic()-now)))
     finally:

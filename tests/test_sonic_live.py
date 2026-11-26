@@ -23,9 +23,10 @@ def pose(ids):
                 body_quat_w=np.tile([1.,0,0,0],(n,1)),joint_pos=np.zeros((n,29)))
 def test_pose_window_and_freshness():
     s=Source();s.accept("pose",pose(range(3)),1.)
-    assert s.pose_window() is None
-    s.accept("pose",pose(range(3,10)),2.)
     assert s.pose_window()["frame"]==0
+    assert s.pose_window()["smpl"].shape==(10,24,3)
+    s.accept("pose",pose(range(3,10)),2.)
+    assert s.pose_window()["frame"]==3
     s.accept("pose",pose(range(3,10)),3.)
     assert s.pose_time==2.
     s.accept("command",dict(planner=[0]),3.)
@@ -56,3 +57,12 @@ def test_slerp_sign_and_clamp():
     y=sample_qpos(x,[-1,.5,3,5])
     np.testing.assert_allclose(abs(y[:,3]),1)
     np.testing.assert_allclose(y[:,7],[0,.5,3,3])
+
+def test_single_frame_padding_does_not_hide_dropout():
+    s=Source()
+    x=pose([42]);x["smpl_joints"][:]=7
+    s.accept("pose",x,1.)
+    np.testing.assert_array_equal(s.pose_window()["smpl"],np.full((10,24,3),7))
+    s.accept("pose",x,9.)
+    assert s.pose_time==1.
+    assert s.pose_window()["frame"]==42
