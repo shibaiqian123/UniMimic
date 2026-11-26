@@ -142,7 +142,26 @@ parser.add_argument("--dist-no-graphs", action="store_true", help="explicit two-
 parser.add_argument("--observation-mode",choices=["legacy99","proprio93"],default="legacy99")
 parser.add_argument("--omni-index", default=None, help="Paired omni reference index.json")
 parser.add_argument("--omni-data-root", default=None)
+parser.add_argument("--diagnostic-every", type=int, default=0, help="Omni gradient and fixed-replay diagnostics interval; 0 disables")
+parser.add_argument("--diagnostic-start", type=int, default=1000)
+parser.add_argument("--diagnostic-end", type=int, default=0, help="0 means no end")
+parser.add_argument("--diagnostic-batch", type=int, default=64, help="fixed replay sequences per rank")
+parser.add_argument("--diagnostic-window", type=int, default=32)
+parser.add_argument("--full-ckpt-every", type=int, default=0, help="preserve numbered full training checkpoints in staged runner")
 args = parser.parse_args()
+if min(args.diagnostic_every, args.diagnostic_start, args.diagnostic_end, args.full_ckpt_every) < 0:
+    parser.error("diagnostic/checkpoint intervals must be nonnegative")
+if args.diagnostic_every and (not args.omni_index or args.diagnostic_batch < 1 or
+                             not 1 <= args.diagnostic_window <= min(args.warmup_steps, args.buffer_steps)):
+    parser.error("diagnostics require omni, positive batch and window <= warmup_steps/buffer_steps")
+if args.full_ckpt_every and not (DIST or args.omni_index):
+    parser.error("full-ckpt-every currently requires the staged distributed/omni runner")
+
+# Multi-objective autograd.grad retains the actor graph on diagnostic iterations.
+# Keep compilation and CUDA Graphs; disable only AOT backward buffer donation.
+if args.diagnostic_every:
+    import torch._functorch.config as functorch_config
+    functorch_config.donated_buffer = False
 OMNI = args.omni_index is not None
 if OMNI:
     if args.latent_mode!="fsq64" or args.observation_mode!="proprio93" or args.pi_ref_skip:

@@ -98,6 +98,8 @@ class Updates:
         self.pphase=LocalGraph(self._policy,ctx,self.a.cuda_graph)
         self.cphase=LocalGraph(self._critic,ctx,self.a.cuda_graph)
         self.nonfinite=torch.zeros(3,device=g["dev"])
+        from .training_diagnostics import TrainingDiagnostics
+        self.diagnostics=TrainingDiagnostics(g,ctx)
 
     def _world(self):
         w=self.g["buffer"].sample_windows(self.a.wm_batch,self.a.wm_window)
@@ -115,7 +117,7 @@ class Updates:
         self.nonfinite[0].add_((~ok).float())
         return tuple(x.detach().clone() for x in result)
 
-    def _policy(self):
+    def _policy(self, diagnostic=False):
         g,a=self.g,self.a
         s,h=self.omni.starts if self.omni else g["sample_valid_starts"](a.pi_batch)
         S=unflatten_state(s["s"]);S0=S
@@ -138,13 +140,18 @@ class Updates:
         r,d=r.view(a.horizon,a.pi_batch),d.view(a.horizon,a.pi_batch)
         boot=self.v(g["critic_input_c"](S,f,xi_n,goal))
         J,ct,c=actor_objective(r,d,boot,a.gamma,loop_cumprod=a.cuda_graph)
-        loss=-J.mean()
+        loss=policy_loss=-J.mean()
         if self.omni:
             from .omni import auxiliary_total
             inputs=self.omni.imagination_inputs(0,S0[1])
             terms=self.pi.auxiliary(inputs)
             numerator,count=auxiliary_total(terms)
-            loss=loss+numerator/count.clamp_min(1)
+            auxiliary_loss=numerator/count.clamp_min(1)
+            loss=loss+auxiliary_loss
+            if diagnostic:
+                self.diagnostics.gradients(policy_loss, auxiliary_loss)
+                self.diagnostics.scalar("objective/bootstrap_contribution", (a.gamma**a.horizon)*c*boot)
+                self.diagnostics.scalar("objective/total_return", J)
             self.omni.aux.copy_(torch.stack([v.mean().detach() for v in terms.values()]))
         zero_grads(self.pi);loss.backward()
         with torch.no_grad():
@@ -164,7 +171,8 @@ class Updates:
         g,a=self.g,self.a
         if self.omni:self.omni.prepare_imagination()
         g["set_requires_grad"](self.wm,False);g["set_requires_grad"](self.v,False)
-        try:pl,ir,surv,X,r,d=self.pphase()
+        try:
+            pl,ir,surv,X,r,d=self._policy(diagnostic=True) if self.diagnostics.active else self.pphase()
         finally:
             g["set_requires_grad"](self.wm,True);g["set_requires_grad"](self.v,True)
         gn,ok=optimizer_step(self.ctx,self.pi,g["opt_pi"],a.pi_clip_value)
@@ -180,6 +188,7 @@ class Updates:
                 avg.n_averaged.add_(ok.long())
         self.ctx.moments([self.v.norm],[X])
         with torch.no_grad():Y=g["gae_targets_c"](self.v(X),r,d)
+        if self.diagnostics.active:self.diagnostics.imagined(X,r,d,Y)
         xf=X[:-1].reshape(-1,X.shape[-1]);yf=Y.reshape(-1)
         n=xf.shape[0];mb=n//a.critic_minibatches
         if self.cx is None:

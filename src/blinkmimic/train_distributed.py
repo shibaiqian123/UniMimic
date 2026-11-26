@@ -89,6 +89,7 @@ def run(g):
         e=torch.cuda.Event(enable_timing=True);e.record();return e
     try:
         for it in range(start,a.iterations):
+            updates.diagnostics.begin(it+1)
             lr=g["lr_at"](it)
             mult=a.pi_lr_mult
             if decay_at is not None:mult=a.pi_lr_mult+(1-a.pi_lr_mult)*min(1.,(it-decay_at)/max(a.lr_decay_len,1))
@@ -120,6 +121,7 @@ def run(g):
             if it>=a.wm_only_iters:
                 pl,vl,ir,gn,surv=updates.policy()
                 agg[3:8].add_(torch.stack((pl,vl,ir,gn,surv)));agg[8]+=1
+            updates.diagnostics.finish(tb)
             e2=event();phase_events.append((e0,e1,e2))
             nlog+=1
             if (it+1)%a.log_every==0 or it+1==a.iterations:
@@ -174,8 +176,9 @@ def run(g):
             stop,timed=map(bool,flags.tolist())
             final=it+1==a.iterations or stop
             if timed:last_save_wall=wall
-            if final or timed or (it+1)%a.ckpt_every==0:
-                light=a.ckpt_light and not final
+            full_due=bool(a.full_ckpt_every and (it+1)%a.full_ckpt_every==0)
+            if final or timed or full_due or (it+1)%a.ckpt_every==0:
+                light=a.ckpt_light and not (final or full_due)
                 rank_states=None if light else ctx.gather_objects(rng_state())
                 if ctx.main:
                     ck=dict(pi=avg.module.state_dict() if avg else pi.state_dict(),
@@ -191,6 +194,7 @@ def run(g):
                             focus_q=env.focus_q.cpu(),focus_share=float(env.focus_share_t),
                             env_bins={k:getattr(env,k).cpu() for k in ("bin_G","bin_fail","bin_w_avg")})
                         atomic_save(ck,root/"last.pt")
+                        if full_due:atomic_save(ck,root/f"full_{it+1:06d}.pt")
                     compact={k:ck[k] for k in ("pi","iteration","wall_time","sim_steps","args","saved_at")}
                     atomic_save(compact,root/f"ckpt_{it+1:06d}.pt")
                 ctx.barrier()
