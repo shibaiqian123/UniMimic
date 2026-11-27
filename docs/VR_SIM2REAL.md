@@ -12,7 +12,7 @@ g1_deploy_onnx_ref.cpp 的实机接管、LowState、PR控制及停止路径。
 - 原C++在创建LowCmd publisher前调用CheckMode/ReleaseMode。BlinkMimic在一次yes之后调用独立C++工具，最多3次ReleaseMode；任意RPC错误退出，外层35秒上限。只读及仿真完全不调用。
 - HG LowState的motor_state[0:29]保持motor顺序；两边都读取imu_state.quaternion(wxyz)、gyroscope(rad/s)，不使用可相对骨盆转动的torso IMU作本体姿态。模式来自LowState.mode_machine，LowCmd.mode_pr=0(PR)。
 - 模型、93维本体观测、归一化、FSQ、动作缩放、q0、PD均为BlinkMimic。主控制50Hz，bridge500Hz。不能把SONIC kp/kd或阈值当作本模型已验证参数。
-- 本程序等待A+B+X+Y后进行INTERP/HOLD，再进入POLICY；GR00T原C++启动进行INIT后等待控制。此差别保留。
+- 输入yes并完成接管后自动进行INTERP→HOLD；HOLD就绪后按A+B+X+Y进入PLANNER（POLICY）。仿真不询问yes，启动后自动准备。提前按下的启动指令不排队，需在HOLD就绪后重新按下。
 - SONIC停止是停止控制并发送阻尼；streamer的OFF不保证控制进程可重新启动。本程序停止锁存DAMP，需要重开控制会话。保留BlinkMimic现有阻尼数值和看门狗，不直接复制GR00T kd=8。
 - POSE单帧发送，编码器仍为10帧输入，未收到的未来用末帧补齐；并非预测真实未来，不人为等180ms。不是完整复刻GR00T的流缓冲调度器。
 - 模式边缘保持上一参考航向，POSE增量按有效新包累计；不会每帧用实测姿态消除跟踪误差。历史和上一action在模态切换时不清空。
@@ -90,7 +90,7 @@ PYTHONPATH=src OMP_NUM_THREADS=1 .venv/bin/python scripts/deploy/teleop.py real 
 输入一次yes才释放原运动服务并建立控制链路。按原设备规范由操作人员完成调试/低层模式准备；
 不额外执行SONIC deploy.sh，它会成为第二个控制者。
 
-1. 保持支撑，标定姿势按A+B+X+Y，等待INTERP→HOLD→POLICY。
+1. 保持支撑，输入yes后机器人自动INTERP→HOLD；就绪后按A+B+X+Y进入PLANNER/POLICY。等待期间可以连接VR；策略运行后的断流保护保持不变。
 2. PLANNER静止；对齐双臂后按A+X测试小幅POSE，再返回PLANNER。
 3. 点击左摇杆进入VR_3PT，按真实关节反馈标定手腕，再做小幅双臂动作。
 4. POSE中B+Y可进入冻结上身的PLANNER；左摇杆点击在planner与3PT之间切换。

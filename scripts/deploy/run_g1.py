@@ -75,9 +75,14 @@ def main():
         injected.modality=original.modality
         ctl.core.policy=injected
     if not a.sim and not a.read_only:
-        if input("Robot supported / area clear / L2+B ready? Type yes: ").strip()!="yes":return
+        prompt=("Type yes to release motion service and prepare posture; A+B+X+Y enters PLANNER: "
+                if client else "Robot supported / area clear / L2+B ready? Type yes: ")
+        if input(prompt).strip()!="yes":return
     takeover=release_motion(Path(__file__).resolve().parent/"bridge",a.iface,a.domain,a.sim,a.read_only)
     print("Motion takeover: "+json.dumps(takeover),flush=True)
+    if client and not a.read_only:
+        ctl.request_prepare()
+        print("Preparing posture automatically: INTERP -> HOLD. Then A+B+X+Y enters PLANNER.",flush=True)
     a.log_dir=new_session(a.log_dir.resolve())
     print(f"Runner logs: {a.log_dir}",flush=True)
     log=RuntimeLog(a.log_dir/"runner.jsonl",cpu_list(a.logger_cpus))

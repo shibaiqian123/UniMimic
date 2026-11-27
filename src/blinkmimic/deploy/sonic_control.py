@@ -133,6 +133,17 @@ class LiveController(Controller):
         if bundle.cfg["schema"]!="blinkmimic_single_motion_v4":raise ValueError("VR requires trained omni v4 bundle")
         self.core=LiveCore(bundle,policies);self.client=client;self.starts=0;self.stops=0
         self.live_timeout=1.;self.live_mode="OFF";self.target_transition=ModeTransition()
+        self.prepare_requested=False
+    def request_prepare(self):
+        """Called by the runner after operator consent/takeover (sim: automatic)."""
+        if self.state=="PASSIVE":self.prepare_requested=True
+
+    def reference_error(self,message,now):
+        if message is None or now-message["t"]>self.live_timeout:return "VR source process stale"
+        if message["error"]:return message["error"]
+        if now-message["source_time"]>self.live_timeout:return "VR input stream stale"
+        return ""
+
     def update(self,s,now,bridge_fault=None):
         message=self.client.poll()
         if s["keys"]&STOP==STOP:self.damp("remote stop")
@@ -145,25 +156,39 @@ class LiveController(Controller):
         try:
             R,gyro=transform_imu(s["quat"],s["gyro"],self.mount)
             if self.state=="PASSIVE":
-                if message is None or message["start"]<=self.starts:
+                if not self.prepare_requested:
                     out=self.damping(s);out.update(state="PASSIVE",reason="")
                     return out
-                self.starts=message["start"];self.from_q=s["q"].copy();self.core.align(R)
+                self.prepare_requested=False
+                self.starts=message["start"] if message is not None else 0
+                self.from_q=s["q"].copy();self.core.align(R)
                 self.transition("INTERP",now)
-            if message is None or now-message["t"]>self.live_timeout:raise ValueError("VR source process stale")
-            if message["error"]:raise ValueError(message["error"])
-            # Stream loss is latched through the same DAMP path as LowState failures.
-            if now-message["source_time"]>self.live_timeout:raise ValueError("VR input stream stale")
             if self.state in ("INTERP","HOLD"):
                 u=min(1.,(now-self.since)/self.limits["interpolation_s"]) if self.state=="INTERP" else 1.
                 target=self.from_q+(self.b.q0-self.from_q)*(u*u*(3-2*u))
-                if self.state=="INTERP" and u>=1:self.transition("HOLD",now)
-                if self.state=="HOLD" and now-self.since>=1.:
-                    self.transition("POLICY",now)
+                if self.state=="INTERP":
+                    # Consume pre-HOLD starts; never queue an early policy activation.
+                    if message is not None:self.starts=max(self.starts,message["start"])
+                    if u>=1:self.transition("HOLD",now)
+                elif message is not None and message["start"]>self.starts:
+                    self.starts=message["start"]
+                    error=self.reference_error(message,now)
+                    if now-self.since<self.limits["hold_s"]:
+                        self.reject_reason="HOLD settling; press A+B+X+Y again when ready"
+                    elif error:self.reject_reason=error
+                    elif message["mode"]!="PLANNER":
+                        self.reject_reason="Select PLANNER, then press A+B+X+Y"
+                    elif now>message["plan_end"]-.04:
+                        self.reject_reason="planner reference expired"
+                    else:self.transition("POLICY",now)
+                elif now-self.since>=self.limits["hold_s"] and not self.reject_reason:
+                    self.reject_reason="Ready: press A+B+X+Y to enter PLANNER"
                 gain=self.b.cfg.get("preparation_gain_scale",1.)
                 kp=self.b.kp*gain;kd=self.b.kd*np.sqrt(gain)
                 out=dict(action=np.zeros(29),frame=0,phase="pre",inference_ms=0.)
             else:
+                error=self.reference_error(message,now)
+                if error:raise ValueError(error)
                 if now>message["plan_end"]-.04 and message["mode"]!="POSE":raise ValueError("planner reference expired")
                 if message["mode"]=="POSE" and message["pose"] is None:
                     raise ValueError("POSE has no complete 10-frame window")
@@ -180,7 +205,7 @@ class LiveController(Controller):
             requested=np.array(target,copy=True)
             target,n=limit_target(target,s["q"],s["dq"],self.b,self.stage,kp,kd)
             self.target_transition.last=np.array(target,copy=True)
-            self.live_mode=message["mode"]
+            self.live_mode=message["mode"] if self.state=="POLICY" else self.state
             out.update(target=target,kp=kp,kd=kd,n_clamped=n,state=self.state,live_mode=self.live_mode,
                        reject_reason=self.reject_reason,requested_target=requested,
                        pd_torque_estimate=kp*(target-s["q"])-kd*s["dq"])

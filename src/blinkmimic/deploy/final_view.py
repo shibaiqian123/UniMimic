@@ -141,7 +141,7 @@ def main():
                       f"State: {rs.get('state','WAITING')} | Mode: {rs.get('live_mode','OFF')} | sim {s['sim_time']:.2f}s\n"
                       f"Support: {bool(s['support'])} | pose window delay: 180ms\n"
                       f"{rs.get('reason') or rs.get('reject_reason','')}\n"
-                      "PICO: ABXY prepare/stop | AX POSE | Left-stick click VR_3PT\n"
+                      "PICO: auto prepare -> HOLD | ABXY PLANNER/stop | AX POSE | Left-stick click VR_3PT\n"
                       "B simulation support | D stop | G live references | F camera\n"
                       "Orange: SMPL | RGB axes: calibrated three points | Blue: planner")
             mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_NORMAL,mujoco.mjtGridPos.mjGRID_TOPLEFT,viewport,text,"",context)
